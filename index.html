@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-  <title>減重日誌 · BURN</title>
+  <title>健康日誌</title>
   <meta name="description" content="運動燃燒風格的減重與飲食追蹤工具">
   <meta name="theme-color" content="#0E0D0B">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="減重日誌">
+  <meta name="apple-mobile-web-app-title" content="健康日誌">
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="icon" type="image/png" href="icon-192.png">
@@ -515,7 +515,7 @@ function Header({ goal, tab, setTab, onOpenSettings, onOpenExport }) {
               {goal?.name ? `HI, ${goal.name}` : 'WELCOME'}
             </div>
           </div>
-          <div className="disp text-4xl font-bold mt-1.5 leading-none">減重日誌</div>
+          <div className="disp text-4xl font-bold mt-1.5 leading-none">健康日誌</div>
           <div className="text-[11px] num upper mt-1.5" style={{ color: C.mute }}>
             {todayStr().replace(/-/g, ' / ')} · {dayOfWeek(todayStr())}
           </div>
@@ -1804,7 +1804,7 @@ function ExportView({ goal, entries, diary, from, setFrom, to, setTo, onBack, sh
 
       // Sheet 1: Summary
       const summaryRows = [
-        ['減重日誌 匯出資料'],
+        ['健康日誌 匯出資料'],
         [],
         ['姓名', goal?.name || ''],
         ['身高 (cm)', goal?.height || ''],
@@ -1872,7 +1872,7 @@ function ExportView({ goal, entries, diary, from, setFrom, to, setTo, onBack, sh
         XLSX.utils.book_append_sheet(wb, wsDay, '每日總計');
       }
 
-      const fileName = `減重日誌_${from}_${to}.xlsx`;
+      const fileName = `健康日誌_${from}_${to}.xlsx`;
       XLSX.writeFile(wb, fileName);
       showToast('已下載 Excel');
     } catch (e) {
@@ -1952,7 +1952,7 @@ function PrintArea({ goal, from, to, weights, diary }) {
   const sum = (items, key) => (items || []).reduce((s, x) => s + (parseFloat(x[key]) || 0), 0);
   return (
     <div className="print-area" style={{ display: 'none' }}>
-      <h1>減重日誌</h1>
+      <h1>健康日誌</h1>
       <div className="meta">
         {goal?.name && <span>{goal.name}　·　</span>}
         日期範圍：{from} ~ {to}　·　列印於 {todayStr()}
