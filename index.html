@@ -1,0 +1,2052 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>減重日誌 · BURN</title>
+  <meta name="description" content="運動燃燒風格的減重與飲食追蹤工具">
+  <meta name="theme-color" content="#0E0D0B">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="減重日誌">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="icon" type="image/png" href="icon-192.png">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react-dom": "https://esm.sh/react-dom@18.3.1",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+      "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+      "recharts": "https://esm.sh/recharts@2.12.7?deps=react@18.3.1,react-dom@18.3.1",
+      "lucide-react": "https://esm.sh/lucide-react@0.383.0?deps=react@18.3.1",
+      "xlsx": "https://esm.sh/xlsx@0.18.5"
+    }
+  }
+  </script>
+
+  <script src="https://unpkg.com/@babel/standalone@7.25.7/babel.min.js"></script>
+
+  <style>
+    html, body, #root { background: #0E0D0B; color: #F5F1EB; min-height: 100vh; margin: 0; }
+    body { overscroll-behavior: none; }
+    #loader { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; background: #0E0D0B; z-index: 9999; }
+    #loader .flame { font-size: 48px; animation: pulse 1.5s ease-in-out infinite; }
+    #loader .msg { color: #807A72; font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase; font-family: 'Inter', sans-serif; }
+    @keyframes pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.1); opacity: 0.7; } }
+  </style>
+</head>
+<body>
+  <div id="loader"><div class="flame">🔥</div><div class="msg">Loading</div></div>
+  <div id="root"></div>
+
+  <script>
+    // Hide loader once React renders
+    window.__hideLoader = () => {
+      const l = document.getElementById('loader');
+      if (l) l.style.display = 'none';
+    };
+  </script>
+
+  <script type="text/babel" data-type="module" data-presets="react">
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { createRoot } from 'react-dom/client';
+import {
+  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
+  ReferenceLine, CartesianGrid
+} from 'recharts';
+import {
+  Plus, Trash2, X, Edit3, TrendingDown, TrendingUp,
+  Minus, Settings as SettingsIcon, Check, ChevronRight, Flame,
+  PenLine, History, ChevronLeft, ChevronRight as ChevronRt,
+  Droplet, Coffee, UtensilsCrossed, GlassWater, Clock,
+  Download, Printer, FileSpreadsheet, Zap, Activity,
+} from 'lucide-react';
+import * as XLSX from 'xlsx';
+
+
+// =============================================================
+// Cloud Storage (Google Sheets via Apps Script)
+// =============================================================
+const LOCAL_GAS_KEY = 'wt-gas-url';
+const LOCAL_USER_KEY = 'wt-user-key';
+
+function getUserKey() {
+  let k = localStorage.getItem(LOCAL_USER_KEY);
+  if (!k) {
+    k = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : ('u-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+    localStorage.setItem(LOCAL_USER_KEY, k);
+  }
+  return k;
+}
+
+const cloudStorage = {
+  get gasUrl() { return localStorage.getItem(LOCAL_GAS_KEY) || ''; },
+  setGasUrl(url) {
+    if (url && url.trim()) localStorage.setItem(LOCAL_GAS_KEY, url.trim());
+    else localStorage.removeItem(LOCAL_GAS_KEY);
+  },
+  async get(key) {
+    const url = this.gasUrl;
+    if (url) {
+      try {
+        const resp = await fetch(url + '?op=get&user=' + encodeURIComponent(getUserKey()), { cache: 'no-store' });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data && data.ok && data.payload) {
+            const v = JSON.stringify(data.payload);
+            localStorage.setItem(key, v);
+            return { value: v };
+          }
+        }
+      } catch (e) {
+        console.warn('Cloud load failed, using local cache', e);
+      }
+    }
+    const v = localStorage.getItem(key);
+    return v ? { value: v } : null;
+  },
+  async set(key, value) {
+    // Save locally first (instant, never fails)
+    localStorage.setItem(key, value);
+    // Fire-and-forget cloud save
+    const url = this.gasUrl;
+    if (url) {
+      try {
+        const payload = JSON.parse(value);
+        fetch(url, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({ op: 'set', user: getUserKey(), payload }),
+        }).catch(e => console.warn('Cloud save failed', e));
+      } catch (e) {
+        console.warn('Cloud save error', e);
+      }
+    }
+    return { value, key };
+  },
+};
+
+const STORAGE_KEY = 'weight-tracker-v1';
+const DEFAULT_WATER_GOAL = 2000;
+const DEFAULT_SODIUM_GOAL = 2000; // mg (WHO)
+const DEFAULT_SUGAR_GOAL = 25;    // g (WHO 添加糖)
+const DEFAULT_CALORIE_GOAL = 1800;
+
+// ---------- utils ----------
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function nowTime() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+function fmtDate(s, withYear = false) {
+  if (!s) return '';
+  const d = new Date(s + 'T00:00:00');
+  return withYear ? `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}` : `${d.getMonth() + 1}/${d.getDate()}`;
+}
+function dayOfWeek(s) {
+  return ['日','一','二','三','四','五','六'][new Date(s+'T00:00:00').getDay()];
+}
+function shiftDate(s, delta) {
+  const d = new Date(s + 'T00:00:00');
+  d.setDate(d.getDate() + delta);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function relativeDayLabel(s) {
+  const t = todayStr();
+  if (s === t) return '今天';
+  if (s === shiftDate(t, -1)) return '昨天';
+  if (s === shiftDate(t, 1)) return '明天';
+  return null;
+}
+function suggestTarget(heightCm) {
+  const h = parseFloat(heightCm);
+  if (!h || h < 100 || h > 250) return null;
+  const m = h / 100;
+  return {
+    recommended: +(22 * m * m).toFixed(1),
+    min: +(18.5 * m * m).toFixed(1),
+    max: +(24 * m * m).toFixed(1),
+  };
+}
+function suggestCalories(weightKg, heightCm) {
+  const w = parseFloat(weightKg), h = parseFloat(heightCm);
+  if (!w || !h) return DEFAULT_CALORIE_GOAL;
+  // Mifflin-St Jeor averaged across sex/age (~30y)
+  const bmr = 10 * w + 6.25 * h - 150;
+  const tdee = bmr * 1.4; // light activity
+  const target = Math.max(1200, tdee - 500); // 500 cal deficit, floor 1200
+  return Math.round(target / 50) * 50;
+}
+
+// ---------- palette (運動燃燒 dark theme) ----------
+const C = {
+  bg: '#0E0D0B',
+  card: '#181613',
+  cardSoft: '#221E1A',
+  cardLift: '#2A2620',
+  border: '#2A2622',
+  borderSoft: '#221F1B',
+  ink: '#F5F1EB',
+  inkSoft: '#C9C2BA',
+  mute: '#807A72',
+  dim: '#5A554F',
+  flame: '#FF6B1F',
+  flameSoft: '#FF8F4F',
+  ember: '#E63946',
+  glow: '#FFC857',
+  cool: '#4ECDC4',
+  burn: '#FF3D00',
+  ok: '#06D6A0',
+};
+
+const FONT_CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap');
+
+* { -webkit-tap-highlight-color: transparent; -webkit-font-smoothing: antialiased; }
+html, body, #root { background: ${C.bg}; }
+.disp { font-family: 'Oswald', 'Noto Sans TC', sans-serif; letter-spacing: 0.01em; }
+.sans { font-family: 'Inter', 'Noto Sans TC', system-ui, -apple-system, sans-serif; }
+.num { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum'; }
+.upper { text-transform: uppercase; letter-spacing: 0.15em; }
+input, textarea, button, select { font-family: inherit; color: inherit; }
+input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; }
+input::placeholder, textarea::placeholder { color: ${C.dim}; }
+input[type="date"], input[type="time"] { color-scheme: dark; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.glow-flame { box-shadow: 0 0 24px rgba(255,107,31,0.28), inset 0 1px 0 rgba(255,255,255,0.04); }
+.glow-soft { box-shadow: 0 0 16px rgba(255,107,31,0.12); }
+@keyframes pop { 0% { transform: scale(.94); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+.pop { animation: pop .22s ease-out; }
+@keyframes slideUp { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.slide-up { animation: slideUp .3s ease-out; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.fade-in { animation: fadeIn .2s ease-out; }
+@keyframes flicker { 0%,100% { opacity: 1; } 50% { opacity: 0.85; } }
+.flicker { animation: flicker 2.5s ease-in-out infinite; }
+
+@media print {
+  body, html, #root { background: white !important; color: black !important; }
+  .no-print { display: none !important; }
+  .print-area {
+    display: block !important;
+    position: static !important;
+    background: white !important;
+    color: black !important;
+    padding: 24px;
+    max-width: none !important;
+  }
+  .print-area * { color: black !important; background: white !important; border-color: #ccc !important; box-shadow: none !important; }
+  .print-area table { border-collapse: collapse; width: 100%; }
+  .print-area th, .print-area td { border: 1px solid #aaa; padding: 6px 10px; text-align: left; font-size: 12px; }
+  .print-area th { background: #f0f0f0 !important; font-weight: 600; }
+  .print-area h1 { font-size: 22px; margin: 0 0 4px; }
+  .print-area h2 { font-size: 15px; margin: 18px 0 8px; border-bottom: 1px solid #999; padding-bottom: 4px; }
+  .print-area h3 { font-size: 13px; margin: 12px 0 4px; }
+  .print-area .meta { color: #555 !important; font-size: 11px; }
+  .print-area .day-block { page-break-inside: avoid; margin-bottom: 14px; }
+}
+`;
+
+// ============================================================
+// ROOT
+// ============================================================
+function WeightTracker() {
+  const [entries, setEntries] = useState([]);
+  const [goal, setGoal] = useState(null);
+  const [diary, setDiary] = useState({});
+  const [loaded, setLoaded] = useState(false);
+  const [view, setView] = useState('main'); // main | setup | settings | export
+  const [tab, setTab] = useState('food');
+  const [editingEntry, setEditingEntry] = useState(null);
+  const [chartRange, setChartRange] = useState(30);
+  const [toast, setToast] = useState(null);
+
+  const [qWeight, setQWeight] = useState('');
+  const [qDate, setQDate] = useState(todayStr());
+  const [qNote, setQNote] = useState('');
+  const [showNote, setShowNote] = useState(false);
+
+  const [exportFrom, setExportFrom] = useState(shiftDate(todayStr(), -29));
+  const [exportTo, setExportTo] = useState(todayStr());
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await cloudStorage.get(STORAGE_KEY);
+        if (r?.value) {
+          const p = JSON.parse(r.value);
+          setEntries(Array.isArray(p.entries) ? p.entries : []);
+          setGoal(p.goal || null);
+          setDiary(p.diary || {});
+          if (!p.goal) setView('setup');
+        } else setView('setup');
+      } catch {
+        setView('setup');
+      }
+      setLoaded(true);
+    })();
+  }, []);
+
+  const persist = async (override = {}) => {
+    const payload = {
+      entries: 'entries' in override ? override.entries : entries,
+      goal: 'goal' in override ? override.goal : goal,
+      diary: 'diary' in override ? override.diary : diary,
+    };
+    try { await cloudStorage.set(STORAGE_KEY, JSON.stringify(payload)); }
+    catch (e) { console.error('save error', e); }
+  };
+
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 1500);
+  };
+
+  const sorted = useMemo(
+    () => [...entries].sort((a, b) => a.date.localeCompare(b.date)),
+    [entries]
+  );
+  const latest = sorted[sorted.length - 1];
+
+  const stats = useMemo(() => {
+    if (!goal) return null;
+    const target = goal.targetWeight;
+    const start = goal.startWeight ?? sorted[0]?.weight ?? null;
+    const cur = latest?.weight ?? null;
+    if (start === null || cur === null) {
+      return { start, target, cur, hasData: false, lost: 0, remaining: 0, progress: 0, wkChange: null };
+    }
+    const lost = +(start - cur).toFixed(1);
+    const remaining = +(cur - target).toFixed(1);
+    const totalToLose = start - target;
+    const progress = totalToLose > 0 ? Math.max(0, Math.min(1, lost / totalToLose)) : (cur <= target ? 1 : 0);
+
+    const now = new Date();
+    const d7 = new Date(now); d7.setDate(now.getDate() - 7);
+    const d14 = new Date(now); d14.setDate(now.getDate() - 14);
+    const thisWk = sorted.filter(e => new Date(e.date) >= d7);
+    const lastWk = sorted.filter(e => { const dt = new Date(e.date); return dt >= d14 && dt < d7; });
+    const avg = arr => arr.length ? arr.reduce((s, e) => s + e.weight, 0) / arr.length : null;
+    const wkChange = (avg(thisWk) !== null && avg(lastWk) !== null) ? +(avg(thisWk) - avg(lastWk)).toFixed(2) : null;
+
+    return { start, target, cur, hasData: true, lost, remaining, progress, wkChange };
+  }, [sorted, latest, goal]);
+
+  const chartData = useMemo(() => {
+    if (!sorted.length) return [];
+    let filtered = sorted;
+    if (chartRange !== 0) {
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - chartRange);
+      filtered = sorted.filter(e => new Date(e.date) >= cutoff);
+    }
+    return filtered.map(e => ({ date: e.date, label: fmtDate(e.date), weight: e.weight }));
+  }, [sorted, chartRange]);
+
+  // -------- handlers --------
+  const recordWeight = async () => {
+    const w = parseFloat(qWeight);
+    if (!w || w <= 0 || w > 500) { showToast('請輸入有效的體重'); return; }
+    const i = entries.findIndex(e => e.date === qDate);
+    let newEntries;
+    if (i >= 0) {
+      newEntries = [...entries];
+      newEntries[i] = { ...newEntries[i], weight: w, note: qNote || newEntries[i].note || '' };
+      showToast('已更新');
+    } else {
+      newEntries = [...entries, { id: Date.now(), date: qDate, weight: w, note: qNote }];
+      showToast('紀錄完成');
+    }
+    setEntries(newEntries);
+    await persist({ entries: newEntries });
+    setQWeight(''); setQNote(''); setShowNote(false); setQDate(todayStr());
+  };
+  const updateEntry = async (id, updates) => {
+    const ne = entries.map(e => e.id === id ? { ...e, ...updates } : e);
+    setEntries(ne); await persist({ entries: ne });
+  };
+  const deleteEntry = async (id) => {
+    const ne = entries.filter(e => e.id !== id);
+    setEntries(ne); await persist({ entries: ne });
+    setEditingEntry(null); showToast('已刪除');
+  };
+
+  const completeSetup = async ({ name, height, currentWeight, targetWeight }) => {
+    const h = parseFloat(height);
+    const w = currentWeight ? parseFloat(currentWeight) : null;
+    const t = parseFloat(targetWeight);
+    const newGoal = {
+      name: name.trim(),
+      height: h,
+      startWeight: w,
+      targetWeight: t,
+      startDate: todayStr(),
+      waterGoal: DEFAULT_WATER_GOAL,
+      calorieGoal: suggestCalories(w, h),
+      sodiumGoal: DEFAULT_SODIUM_GOAL,
+      sugarGoal: DEFAULT_SUGAR_GOAL,
+    };
+    setGoal(newGoal);
+    let ne = entries;
+    if (w && !entries.length) {
+      ne = [{ id: Date.now(), date: todayStr(), weight: w, note: '起始紀錄' }];
+      setEntries(ne);
+    }
+    await persist({ entries: ne, goal: newGoal });
+    setView('main');
+  };
+
+  const updateDay = async (date, updates) => {
+    const cur = diary[date] || { water: 0, meals: [], drinks: [] };
+    const next = { ...cur, ...updates };
+    const newDiary = { ...diary, [date]: next };
+    setDiary(newDiary);
+    await persist({ diary: newDiary });
+  };
+
+  if (!loaded) {
+    return (
+      <div style={{ background: C.bg, minHeight: '100vh' }} className="sans flex items-center justify-center">
+        <style>{FONT_CSS}</style>
+        <div style={{ color: C.mute }} className="text-sm">載入中⋯</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: C.bg, color: C.ink, minHeight: '100vh' }} className="sans">
+      <style>{FONT_CSS}</style>
+
+      <div className="max-w-md mx-auto px-5 pt-6 pb-32 no-print">
+        {view === 'setup' && <SetupView onComplete={completeSetup} />}
+        {view === 'settings' && (
+          <SettingsView
+            goal={goal} entries={entries} diary={diary}
+            onBack={() => setView('main')}
+            onSave={async (newGoal) => { setGoal(newGoal); await persist({ goal: newGoal }); showToast('已更新'); }}
+            onReset={async () => { setEntries([]); setGoal(null); setDiary({}); await persist({ entries: [], goal: null, diary: {} }); setView('setup'); }}
+          />
+        )}
+        {view === 'export' && (
+          <ExportView
+            goal={goal} entries={entries} diary={diary}
+            from={exportFrom} setFrom={setExportFrom}
+            to={exportTo} setTo={setExportTo}
+            onBack={() => setView('main')}
+            showToast={showToast}
+          />
+        )}
+        {view === 'main' && (
+          <>
+            <Header
+              goal={goal}
+              tab={tab} setTab={setTab}
+              onOpenSettings={() => setView('settings')}
+              onOpenExport={() => setView('export')}
+            />
+            {tab === 'weight' && (
+              <WeightView
+                goal={goal} stats={stats} sorted={sorted} latest={latest}
+                chartData={chartData} chartRange={chartRange} setChartRange={setChartRange}
+                qWeight={qWeight} setQWeight={setQWeight}
+                qDate={qDate} setQDate={setQDate}
+                qNote={qNote} setQNote={setQNote}
+                showNote={showNote} setShowNote={setShowNote}
+                recordWeight={recordWeight}
+                onOpenEntry={setEditingEntry}
+              />
+            )}
+            {tab === 'food' && (
+              <FoodView diary={diary} goal={goal} updateDay={updateDay} showToast={showToast} />
+            )}
+          </>
+        )}
+      </div>
+
+      {editingEntry && (
+        <EditEntryModal
+          entry={editingEntry}
+          onClose={() => setEditingEntry(null)}
+          onSave={async (id, updates) => { await updateEntry(id, updates); setEditingEntry(null); showToast('已儲存'); }}
+          onDelete={deleteEntry}
+        />
+      )}
+
+      {toast && (
+        <div className="fixed left-1/2 -translate-x-1/2 bottom-8 px-5 py-3 rounded-full pop text-sm font-medium z-50 no-print"
+          style={{ background: C.flame, color: 'white', boxShadow: '0 10px 30px rgba(255,107,31,.4)' }}>
+          {toast}
+        </div>
+      )}
+
+      {/* Print area rendered OUTSIDE no-print wrapper so @media print can show it */}
+      {view === 'export' && goal && (() => {
+        const inRange = d => d >= exportFrom && d <= exportTo;
+        const weights = entries.filter(e => inRange(e.date)).sort((a, b) => a.date.localeCompare(b.date));
+        const days = Object.keys(diary || {}).filter(d => inRange(d)).sort();
+        const diaryRows = days.map(d => ({ date: d, ...diary[d] }));
+        return <PrintArea goal={goal} from={exportFrom} to={exportTo} weights={weights} diary={diaryRows} />;
+      })()}
+    </div>
+  );
+}
+
+// ============================================================
+// HEADER
+// ============================================================
+function Header({ goal, tab, setTab, onOpenSettings, onOpenExport }) {
+  return (
+    <div className="mb-5">
+      <div className="flex items-center justify-between pt-1">
+        <div>
+          <div className="flex items-center gap-2">
+            <Flame size={18} style={{ color: C.flame }} className="flicker" strokeWidth={2.5} />
+            <div className="text-[11px] upper font-semibold" style={{ color: C.flame }}>
+              {goal?.name ? `HI, ${goal.name}` : 'WELCOME'}
+            </div>
+          </div>
+          <div className="disp text-4xl font-bold mt-1.5 leading-none">減重日誌</div>
+          <div className="text-[11px] num upper mt-1.5" style={{ color: C.mute }}>
+            {todayStr().replace(/-/g, ' / ')} · {dayOfWeek(todayStr())}
+          </div>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <button onClick={onOpenExport}
+            className="w-9 h-9 rounded-xl flex items-center justify-center"
+            style={{ background: C.card, border: `1px solid ${C.border}` }}>
+            <Download size={14} strokeWidth={2.2} style={{ color: C.inkSoft }} />
+          </button>
+          <button onClick={onOpenSettings}
+            className="w-9 h-9 rounded-xl flex items-center justify-center"
+            style={{ background: C.card, border: `1px solid ${C.border}` }}>
+            <SettingsIcon size={14} strokeWidth={2.2} style={{ color: C.inkSoft }} />
+          </button>
+        </div>
+      </div>
+
+      <div className="flex gap-1 mt-5 p-1 rounded-2xl" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+        {[
+          { v: 'food', l: '飲食', icon: UtensilsCrossed },
+          { v: 'weight', l: '體重', icon: Activity },
+        ].map(t => (
+          <button key={t.v} onClick={() => setTab(t.v)}
+            className="flex-1 py-2.5 text-sm font-semibold rounded-xl transition-all flex items-center justify-center gap-1.5 upper"
+            style={{
+              background: tab === t.v ? C.flame : 'transparent',
+              color: tab === t.v ? 'white' : C.mute,
+              boxShadow: tab === t.v ? '0 4px 14px rgba(255,107,31,.35)' : 'none',
+            }}>
+            <t.icon size={13} strokeWidth={2.5} />
+            {t.l}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// WEIGHT VIEW
+// ============================================================
+function WeightView({
+  goal, stats, sorted, latest, chartData, chartRange, setChartRange,
+  qWeight, setQWeight, qDate, setQDate, qNote, setQNote, showNote, setShowNote,
+  recordWeight, onOpenEntry,
+}) {
+  const hasData = sorted.length > 0;
+  const recent = [...sorted].reverse().slice(0, 10);
+  const lastChange = (() => {
+    if (sorted.length < 2) return null;
+    return +(sorted[sorted.length - 1].weight - sorted[sorted.length - 2].weight).toFixed(1);
+  })();
+
+  return (
+    <div className="space-y-4 slide-up">
+      <div className="rounded-2xl p-5"
+        style={{ background: `linear-gradient(135deg, ${C.card} 0%, ${C.cardSoft} 100%)`, border: `1px solid ${C.border}` }}>
+        <div className="flex items-baseline justify-between">
+          <div className="text-[11px] upper font-semibold" style={{ color: C.mute }}>目前體重</div>
+          {latest && <div className="text-[11px] num" style={{ color: C.mute }}>{fmtDate(latest.date, true)}</div>}
+        </div>
+        <div className="flex items-baseline gap-2 mt-2">
+          <div className="disp text-7xl font-bold num leading-none" style={{ color: C.ink }}>
+            {latest ? latest.weight.toFixed(1) : '—'}
+          </div>
+          <div className="text-base" style={{ color: C.mute }}>kg</div>
+        </div>
+
+        {stats?.hasData && (
+          <div className="mt-4 flex items-center gap-3 text-sm">
+            <ChangePill value={-stats.lost} label="總計" />
+            {lastChange !== null && <ChangePill value={lastChange} label="上次" />}
+            {stats.wkChange !== null && <ChangePill value={stats.wkChange} label="本週均" />}
+          </div>
+        )}
+
+        {stats?.hasData && (
+          <div className="mt-4">
+            <div className="flex justify-between text-[11px] mb-1.5" style={{ color: C.mute }}>
+              <span className="upper font-semibold">目標進度</span>
+              <span className="num">{(stats.progress * 100).toFixed(0)}% · 還差 {Math.max(0, stats.remaining).toFixed(1)} kg</span>
+            </div>
+            <div className="h-1.5 rounded-full overflow-hidden" style={{ background: C.borderSoft }}>
+              <div className="h-full rounded-full transition-all duration-500"
+                style={{ width: `${stats.progress * 100}%`, background: `linear-gradient(90deg, ${C.flameSoft}, ${C.flame})` }} />
+            </div>
+            <div className="flex justify-between text-[10px] mt-1 num" style={{ color: C.dim }}>
+              <span>{stats.start.toFixed(1)}</span>
+              <span>{stats.target.toFixed(1)}</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-2xl p-5" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <div className="text-[11px] upper font-semibold" style={{ color: C.mute }}>新增紀錄</div>
+            <div className="text-[10px] mt-0.5" style={{ color: C.dim }}>想到再量 · 不必每天</div>
+          </div>
+          <input type="date" value={qDate} onChange={e => setQDate(e.target.value)}
+            className="text-xs num bg-transparent outline-none" style={{ color: C.mute }} />
+        </div>
+        <div className="flex items-end gap-3">
+          <div className="flex-1 relative">
+            <input type="number" step="0.1" inputMode="decimal" value={qWeight}
+              onChange={e => setQWeight(e.target.value)} placeholder="0.0"
+              className="w-full disp text-4xl font-bold num bg-transparent outline-none pb-1"
+              style={{ color: C.ink, borderBottom: `2px solid ${C.border}` }} />
+            <div className="absolute right-0 bottom-2 text-sm" style={{ color: C.mute }}>kg</div>
+          </div>
+          <button onClick={recordWeight} disabled={!qWeight}
+            className="w-14 h-14 rounded-2xl flex items-center justify-center transition-all active:scale-95 disabled:opacity-30"
+            style={{ background: C.flame, boxShadow: qWeight ? '0 6px 20px rgba(255,107,31,.45)' : 'none' }}>
+            <Check size={22} strokeWidth={3} color="white" />
+          </button>
+        </div>
+        {!showNote ? (
+          <button onClick={() => setShowNote(true)} className="mt-3 text-xs flex items-center gap-1.5" style={{ color: C.mute }}>
+            <PenLine size={12} /> 加上備註
+          </button>
+        ) : (
+          <textarea value={qNote} onChange={e => setQNote(e.target.value)}
+            placeholder="運動、飲食、心情⋯" rows={2}
+            className="w-full text-sm p-3 mt-3 rounded-xl outline-none resize-none slide-up"
+            style={{ background: C.cardSoft, border: `1px solid ${C.borderSoft}`, color: C.ink }} />
+        )}
+      </div>
+
+      {hasData && (
+        <div className="rounded-2xl p-5" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+          <div className="flex items-center justify-between mb-4">
+            <div className="text-[11px] upper font-semibold" style={{ color: C.mute }}>趨勢</div>
+            <div className="flex gap-1 p-0.5 rounded-full" style={{ background: C.cardSoft }}>
+              {[{ v: 7, l: '週' }, { v: 30, l: '月' }, { v: 90, l: '季' }, { v: 0, l: '全部' }].map(opt => (
+                <button key={opt.v} onClick={() => setChartRange(opt.v)}
+                  className="px-2.5 py-1 text-[11px] rounded-full font-semibold transition-colors"
+                  style={{ background: chartRange === opt.v ? C.flame : 'transparent', color: chartRange === opt.v ? 'white' : C.mute }}>
+                  {opt.l}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div style={{ height: 180 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={C.flame} stopOpacity={0.4} />
+                    <stop offset="100%" stopColor={C.flame} stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="2 4" stroke={C.borderSoft} vertical={false} />
+                <XAxis dataKey="label" tick={{ fontSize: 10, fill: C.mute }} axisLine={false} tickLine={false} minTickGap={20} />
+                <YAxis domain={['dataMin - 0.5', 'dataMax + 0.5']} tick={{ fontSize: 10, fill: C.mute }} axisLine={false} tickLine={false} width={28} />
+                <Tooltip contentStyle={{ background: C.cardLift, border: `1px solid ${C.border}`, borderRadius: 8, color: C.ink, fontSize: 12 }}
+                  labelStyle={{ color: C.mute }} formatter={(v) => [`${v} kg`, '體重']} />
+                {goal && <ReferenceLine y={goal.targetWeight} stroke={C.glow} strokeDasharray="4 4" strokeWidth={1.2}
+                  label={{ value: '目標', position: 'right', fill: C.glow, fontSize: 10 }} />}
+                <Area type="monotone" dataKey="weight" stroke={C.flame} strokeWidth={2.5} fill="url(#g)"
+                  dot={{ r: 3, fill: C.bg, stroke: C.flame, strokeWidth: 2 }}
+                  activeDot={{ r: 5, fill: C.flame, stroke: C.bg, strokeWidth: 2 }} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+
+      {stats?.hasData && stats.wkChange !== null && <ReflectionCard stats={stats} />}
+
+      {hasData && (
+        <div>
+          <div className="flex items-center gap-2 px-1 mb-2.5">
+            <History size={13} style={{ color: C.mute }} />
+            <div className="text-[11px] upper font-semibold" style={{ color: C.mute }}>近期紀錄</div>
+          </div>
+          <div className="rounded-2xl overflow-hidden" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+            {recent.map((e, i) => {
+              const prev = sorted[sorted.indexOf(e) - 1];
+              const change = prev ? +(e.weight - prev.weight).toFixed(1) : null;
+              return (
+                <button key={e.id} onClick={() => onOpenEntry(e)}
+                  className="w-full px-5 py-3.5 flex items-center gap-4 text-left active:bg-white/[.03] transition-colors"
+                  style={{ borderTop: i === 0 ? 'none' : `1px solid ${C.borderSoft}` }}>
+                  <div className="flex flex-col items-center w-10 shrink-0">
+                    <div className="text-[10px]" style={{ color: C.mute }}>{dayOfWeek(e.date)}</div>
+                    <div className="disp text-xl font-bold num leading-tight">{new Date(e.date + 'T00:00:00').getDate()}</div>
+                    <div className="text-[9px] num" style={{ color: C.mute }}>{new Date(e.date + 'T00:00:00').getMonth() + 1}月</div>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline gap-2">
+                      <div className="disp text-2xl font-bold num">{e.weight.toFixed(1)}</div>
+                      <div className="text-xs" style={{ color: C.mute }}>kg</div>
+                      {change !== null && change !== 0 && (
+                        <div className="text-xs num ml-auto font-semibold" style={{ color: change < 0 ? C.ok : C.ember }}>
+                          {change > 0 ? '+' : ''}{change}
+                        </div>
+                      )}
+                    </div>
+                    {e.note && <div className="text-xs mt-0.5 truncate" style={{ color: C.mute }}>{e.note}</div>}
+                  </div>
+                  <ChevronRight size={14} style={{ color: C.dim }} />
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {!hasData && (
+        <div className="rounded-2xl p-8 text-center" style={{ background: C.card, border: `1px dashed ${C.border}` }}>
+          <Flame size={22} style={{ color: C.flame }} className="mx-auto mb-2" />
+          <div className="text-sm" style={{ color: C.mute }}>還沒有體重紀錄。<br />想到再量就好。</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// FOOD VIEW
+// ============================================================
+function FoodView({ diary, goal, updateDay, showToast }) {
+  const [date, setDate] = useState(todayStr());
+  const day = diary[date] || { water: 0, meals: [], drinks: [] };
+  const [mealModal, setMealModal] = useState(null);
+  const [drinkModal, setDrinkModal] = useState(null);
+  const [customWaterOpen, setCustomWaterOpen] = useState(false);
+
+  const totals = useMemo(() => {
+    const sum = (items, key) => (items || []).reduce((s, x) => s + (parseFloat(x[key]) || 0), 0);
+    const cal = sum(day.meals, 'calories') + sum(day.drinks, 'calories');
+    const sod = sum(day.meals, 'sodium') + sum(day.drinks, 'sodium');
+    const sug = sum(day.meals, 'sugar') + sum(day.drinks, 'sugar');
+    return { cal, sod, sug };
+  }, [day]);
+
+  const addWater = (a) => updateDay(date, { water: Math.max(0, Math.min(20000, (day.water || 0) + a)) });
+  const setWater = (a) => updateDay(date, { water: Math.max(0, Math.min(20000, a)) });
+
+  const saveMeal = (meal) => {
+    let meals = [...(day.meals || [])];
+    const i = meals.findIndex(m => m.id === meal.id);
+    if (i >= 0) meals[i] = meal; else meals.push(meal);
+    meals.sort((a, b) => (a.time || '99').localeCompare(b.time || '99'));
+    updateDay(date, { meals });
+    setMealModal(null); showToast(i >= 0 ? '已更新' : '已記錄');
+  };
+  const deleteMeal = (id) => {
+    updateDay(date, { meals: (day.meals || []).filter(m => m.id !== id) });
+    setMealModal(null); showToast('已刪除');
+  };
+  const saveDrink = (drink) => {
+    let drinks = [...(day.drinks || [])];
+    const i = drinks.findIndex(d => d.id === drink.id);
+    if (i >= 0) drinks[i] = drink; else drinks.push(drink);
+    drinks.sort((a, b) => (a.time || '99').localeCompare(b.time || '99'));
+    updateDay(date, { drinks });
+    setDrinkModal(null); showToast(i >= 0 ? '已更新' : '已記錄');
+  };
+  const deleteDrink = (id) => {
+    updateDay(date, { drinks: (day.drinks || []).filter(d => d.id !== id) });
+    setDrinkModal(null); showToast('已刪除');
+  };
+
+  return (
+    <div className="space-y-4 slide-up">
+      <DateNavigator date={date} setDate={setDate} />
+
+      <NutritionSummary
+        cal={totals.cal} sod={totals.sod} sug={totals.sug} water={day.water || 0}
+        calGoal={goal?.calorieGoal || DEFAULT_CALORIE_GOAL}
+        sodGoal={goal?.sodiumGoal || DEFAULT_SODIUM_GOAL}
+        sugGoal={goal?.sugarGoal || DEFAULT_SUGAR_GOAL}
+        waterGoal={goal?.waterGoal || DEFAULT_WATER_GOAL}
+      />
+
+      <WaterCard
+        water={day.water || 0}
+        goal={goal?.waterGoal || DEFAULT_WATER_GOAL}
+        onAdd={addWater} onCustom={() => setCustomWaterOpen(true)}
+      />
+
+      <Section
+        icon={<UtensilsCrossed size={13} style={{ color: C.mute }} />}
+        title="餐點"
+        meta={(day.meals || []).length > 0 ? `${day.meals.length} 餐` : null}
+        action={
+          <button onClick={() => setMealModal({ mode: 'new' })}
+            className="text-xs px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1 upper"
+            style={{ background: C.flame, color: 'white' }}>
+            <Plus size={11} strokeWidth={3} /> 新增
+          </button>
+        }>
+        {(day.meals || []).length === 0 ? (
+          <EmptyHint text="尚未記錄餐點" />
+        ) : (
+          <div className="rounded-2xl overflow-hidden" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+            {day.meals.map((m, i) => (
+              <button key={m.id} onClick={() => setMealModal({ mode: 'edit', meal: m })}
+                className="w-full text-left px-5 py-4 active:bg-white/[.03] transition-colors"
+                style={{ borderTop: i === 0 ? 'none' : `1px solid ${C.borderSoft}` }}>
+                <div className="flex items-baseline gap-2 mb-1">
+                  <div className="disp text-base font-bold">{m.name || '未命名'}</div>
+                  {m.time && (
+                    <div className="text-[10px] num flex items-center gap-1" style={{ color: C.mute }}>
+                      <Clock size={9} /> {m.time}
+                    </div>
+                  )}
+                  <Edit3 size={11} style={{ color: C.dim }} className="ml-auto" />
+                </div>
+                {m.content && (
+                  <div className="text-sm leading-relaxed whitespace-pre-wrap" style={{ color: C.inkSoft }}>
+                    {m.content}
+                  </div>
+                )}
+                {(m.calories || m.sodium || m.sugar) && (
+                  <div className="flex gap-3 mt-2 text-[10px] num upper" style={{ color: C.mute }}>
+                    {m.calories ? <span>🔥 {m.calories} kcal</span> : null}
+                    {m.sodium ? <span>· 鈉 {m.sodium}mg</span> : null}
+                    {m.sugar ? <span>· 糖 {m.sugar}g</span> : null}
+                  </div>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section
+        icon={<Coffee size={13} style={{ color: C.mute }} />}
+        title="飲料"
+        meta={(day.drinks || []).length > 0 ? `共 ${(day.drinks || []).reduce((s, d) => s + (d.amount || 0), 0)} cc` : null}
+        action={
+          <button onClick={() => setDrinkModal({ mode: 'new' })}
+            className="text-xs px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1 upper"
+            style={{ background: C.flame, color: 'white' }}>
+            <Plus size={11} strokeWidth={3} /> 新增
+          </button>
+        }>
+        {(day.drinks || []).length === 0 ? (
+          <EmptyHint text="尚未記錄飲料" />
+        ) : (
+          <div className="rounded-2xl overflow-hidden" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+            {day.drinks.map((d, i) => (
+              <button key={d.id} onClick={() => setDrinkModal({ mode: 'edit', drink: d })}
+                className="w-full text-left px-5 py-3.5 active:bg-white/[.03] transition-colors flex items-center gap-3"
+                style={{ borderTop: i === 0 ? 'none' : `1px solid ${C.borderSoft}` }}>
+                <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
+                  style={{ background: C.cardSoft, border: `1px solid ${C.borderSoft}` }}>
+                  <GlassWater size={14} style={{ color: C.glow }} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-semibold truncate">{d.name || '飲料'}</div>
+                  <div className="flex gap-2 mt-0.5 text-[10px] num" style={{ color: C.mute }}>
+                    {d.time && <span>{d.time}</span>}
+                    {d.calories ? <span>· 🔥 {d.calories}</span> : null}
+                    {d.sugar ? <span>· 糖 {d.sugar}g</span> : null}
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="disp text-lg font-bold num">{d.amount}</div>
+                  <div className="text-[9px]" style={{ color: C.mute }}>cc</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </Section>
+
+      {mealModal && (
+        <MealModal mode={mealModal.mode} meal={mealModal.meal}
+          onClose={() => setMealModal(null)} onSave={saveMeal} onDelete={deleteMeal} />
+      )}
+      {drinkModal && (
+        <DrinkModal mode={drinkModal.mode} drink={drinkModal.drink}
+          onClose={() => setDrinkModal(null)} onSave={saveDrink} onDelete={deleteDrink} />
+      )}
+      {customWaterOpen && (
+        <CustomWaterModal current={day.water || 0}
+          onClose={() => setCustomWaterOpen(false)}
+          onSet={(v) => { setWater(v); setCustomWaterOpen(false); showToast('已更新'); }} />
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// NUTRITION SUMMARY (today's totals vs goals)
+// ============================================================
+function NutritionSummary({ cal, sod, sug, water, calGoal, sodGoal, sugGoal, waterGoal }) {
+  const calPct = Math.min(1, cal / calGoal);
+  const calRemain = Math.max(0, calGoal - cal);
+  const overCal = cal > calGoal;
+
+  return (
+    <div className="rounded-2xl p-5 glow-flame"
+      style={{
+        background: `linear-gradient(135deg, ${C.card} 0%, ${C.cardSoft} 70%, ${C.cardLift} 100%)`,
+        border: `1px solid ${C.border}`,
+      }}>
+      <div className="flex items-center gap-2 mb-4">
+        <Flame size={14} style={{ color: C.flame }} className="flicker" strokeWidth={2.5} />
+        <div className="text-[11px] upper font-bold" style={{ color: C.flame }}>今日燃燒目標</div>
+      </div>
+
+      <div className="flex items-center gap-5">
+        <ProgressRing
+          value={cal} max={calGoal}
+          size={104} stroke={9}
+          color={overCal ? C.ember : C.flame}
+          bg={C.borderSoft}
+        />
+        <div className="flex-1 min-w-0">
+          <div className="disp text-5xl font-bold num leading-none">{Math.round(cal)}</div>
+          <div className="text-xs mt-1" style={{ color: C.mute }}>
+            <span className="num">/ {calGoal}</span> kcal
+          </div>
+          <div className="text-[11px] mt-1.5 num font-semibold" style={{ color: overCal ? C.ember : C.ok }}>
+            {overCal ? `超出 ${Math.round(cal - calGoal)} kcal` : `還可吃 ${Math.round(calRemain)} kcal`}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-5 space-y-3">
+        <NutRow label="鈉" cur={sod} max={sodGoal} unit="mg" color={C.glow} warnAt={1} />
+        <NutRow label="糖" cur={sug} max={sugGoal} unit="g" color={C.ember} warnAt={1} />
+        <NutRow label="水" cur={water} max={waterGoal} unit="cc" color={C.cool} warnAt={null} />
+      </div>
+    </div>
+  );
+}
+
+function NutRow({ label, cur, max, unit, color, warnAt }) {
+  const pct = Math.min(1.2, cur / max);
+  const over = warnAt !== null && cur > max * warnAt;
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-1">
+        <span className="text-[11px] upper font-bold" style={{ color: C.inkSoft }}>{label}</span>
+        <span className="text-[11px] num" style={{ color: over ? C.ember : C.mute }}>
+          <span className="font-semibold" style={{ color: over ? C.ember : C.ink }}>{Math.round(cur)}</span>
+          <span> / {max} {unit}</span>
+        </span>
+      </div>
+      <div className="h-1.5 rounded-full overflow-hidden" style={{ background: C.borderSoft }}>
+        <div className="h-full rounded-full transition-all duration-500"
+          style={{
+            width: `${Math.min(100, pct * 100)}%`,
+            background: over ? `linear-gradient(90deg, ${color}, ${C.ember})` : color,
+          }} />
+      </div>
+    </div>
+  );
+}
+
+function ProgressRing({ value, max, size = 100, stroke = 8, color, bg }) {
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const pct = Math.max(0, Math.min(1, value / max));
+  return (
+    <div className="relative shrink-0" style={{ width: size, height: size }}>
+      <svg width={size} height={size} className="-rotate-90">
+        <circle cx={size/2} cy={size/2} r={r} stroke={bg} strokeWidth={stroke} fill="none" />
+        <circle cx={size/2} cy={size/2} r={r} stroke={color} strokeWidth={stroke} fill="none"
+          strokeDasharray={c} strokeDashoffset={c * (1 - pct)}
+          strokeLinecap="round" style={{ transition: 'stroke-dashoffset 0.6s ease-out' }} />
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <div className="disp text-xl font-bold num" style={{ color: C.ink }}>{Math.round(pct * 100)}</div>
+        <div className="text-[9px] upper" style={{ color: C.mute }}>%</div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Sub-components
+// ============================================================
+function Section({ icon, title, action, meta, children }) {
+  return (
+    <div>
+      <div className="flex items-center gap-2 px-1 mb-2.5">
+        {icon}
+        <div className="text-[11px] upper font-semibold" style={{ color: C.mute }}>{title}</div>
+        {meta && <div className="text-[10px] num" style={{ color: C.dim }}>· {meta}</div>}
+        <div className="ml-auto">{action}</div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function EmptyHint({ text }) {
+  return (
+    <div className="rounded-2xl p-5 text-center text-sm"
+      style={{ background: C.card, border: `1px dashed ${C.border}`, color: C.dim }}>
+      {text}
+    </div>
+  );
+}
+
+function DateNavigator({ date, setDate }) {
+  const isToday = date === todayStr();
+  const rel = relativeDayLabel(date);
+  return (
+    <div className="rounded-2xl flex items-center justify-between px-2 py-2"
+      style={{ background: C.card, border: `1px solid ${C.border}` }}>
+      <button onClick={() => setDate(shiftDate(date, -1))}
+        className="w-10 h-10 rounded-xl flex items-center justify-center active:bg-white/[.04]">
+        <ChevronLeft size={18} style={{ color: C.inkSoft }} />
+      </button>
+      <div className="text-center">
+        <div className="disp text-lg font-bold leading-tight">
+          {rel || fmtDate(date, true)}
+        </div>
+        <div className="text-[10px] num" style={{ color: C.mute }}>
+          {rel ? fmtDate(date, true) + ' · ' : ''}星期{dayOfWeek(date)}
+        </div>
+      </div>
+      <button onClick={() => !isToday && setDate(shiftDate(date, 1))}
+        disabled={isToday}
+        className="w-10 h-10 rounded-xl flex items-center justify-center active:bg-white/[.04] disabled:opacity-25">
+        <ChevronRt size={18} style={{ color: C.inkSoft }} />
+      </button>
+    </div>
+  );
+}
+
+function WaterCard({ water, goal, onAdd, onCustom }) {
+  const pct = Math.min(1, water / goal);
+  return (
+    <div className="rounded-2xl p-5"
+      style={{ background: C.card, border: `1px solid ${C.border}` }}>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Droplet size={13} style={{ color: C.cool }} />
+          <div className="text-[11px] upper font-semibold" style={{ color: C.mute }}>喝水</div>
+        </div>
+        <button onClick={onCustom} className="text-[11px] px-2.5 py-1 rounded-lg upper"
+          style={{ background: C.cardSoft, color: C.mute, border: `1px solid ${C.borderSoft}` }}>
+          自訂
+        </button>
+      </div>
+      <div className="flex items-baseline gap-2">
+        <div className="disp text-4xl font-bold num leading-none" style={{ color: C.ink }}>{water}</div>
+        <div className="text-sm" style={{ color: C.mute }}>/ {goal} cc</div>
+        <div className="ml-auto text-xs num font-semibold" style={{ color: pct >= 1 ? C.ok : C.mute }}>
+          {(pct * 100).toFixed(0)}%
+        </div>
+      </div>
+      <div className="h-1.5 rounded-full overflow-hidden mt-3" style={{ background: C.borderSoft }}>
+        <div className="h-full rounded-full transition-all duration-500"
+          style={{ width: `${pct * 100}%`, background: `linear-gradient(90deg, ${C.cool}, #6FE5DA)` }} />
+      </div>
+      <div className="flex gap-2 mt-4">
+        {[200, 350, 500].map(a => (
+          <button key={a} onClick={() => onAdd(a)}
+            className="flex-1 py-2.5 rounded-xl text-sm font-bold num active:scale-95 transition-transform"
+            style={{ background: C.cool, color: C.bg }}>
+            +{a}
+          </button>
+        ))}
+        <button onClick={() => onAdd(-250)}
+          className="px-3 py-2.5 rounded-xl text-sm font-semibold active:scale-95 transition-transform num"
+          style={{ background: C.cardSoft, color: C.mute, border: `1px solid ${C.borderSoft}` }}>
+          −250
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ChangePill({ value, label }) {
+  const isDown = value < 0;
+  const isZero = value === 0;
+  const color = isZero ? C.mute : (isDown ? C.ok : C.ember);
+  const Icon = isZero ? Minus : (isDown ? TrendingDown : TrendingUp);
+  return (
+    <div className="flex items-center gap-1.5">
+      <Icon size={13} style={{ color }} strokeWidth={2.5} />
+      <span className="text-sm font-bold num" style={{ color }}>
+        {value > 0 ? '+' : ''}{value.toFixed(1)}
+      </span>
+      <span className="text-[10px] upper" style={{ color: C.mute }}>{label}</span>
+    </div>
+  );
+}
+
+function ReflectionCard({ stats }) {
+  const wk = stats.wkChange;
+  if (wk === null) return null;
+  let icon, title, body, accent;
+  if (wk <= -0.3) {
+    icon = '🔥'; accent = C.flame;
+    title = '本週減少 ' + Math.abs(wk).toFixed(2) + ' kg';
+    body = '節奏穩定。維持飲食記錄與睡眠，避免代謝下調。';
+  } else if (wk <= 0) {
+    icon = '⚡'; accent = C.flameSoft;
+    title = '本週微降 ' + Math.abs(wk).toFixed(2) + ' kg';
+    body = '方向正確但偏緩。可考慮小幅調整熱量或運動。';
+  } else if (wk < 0.5) {
+    icon = '💨'; accent = C.glow;
+    title = '本週上升 ' + wk.toFixed(2) + ' kg';
+    body = '可能是水分波動或週末飲食。觀察 3–4 天再說。';
+  } else {
+    icon = '⚠️'; accent = C.ember;
+    title = '本週上升 ' + wk.toFixed(2) + ' kg';
+    body = '回顧近期飲食紀錄，找出可調整的習慣。';
+  }
+  return (
+    <div className="rounded-2xl p-5" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+      <div className="flex items-start gap-3">
+        <div className="text-2xl leading-none mt-0.5">{icon}</div>
+        <div className="flex-1">
+          <div className="text-[11px] upper font-semibold mb-1" style={{ color: C.mute }}>本週檢討</div>
+          <div className="disp text-lg font-bold" style={{ color: accent }}>{title}</div>
+          <div className="text-sm mt-1 leading-relaxed" style={{ color: C.inkSoft }}>{body}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// MODALS
+// ============================================================
+function ModalShell({ title, subtitle, onClose, children }) {
+  return (
+    <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center p-4 fade-in no-print"
+      style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)' }}>
+      <div className="w-full max-w-md rounded-2xl p-6 slide-up max-h-[90vh] overflow-y-auto no-scrollbar"
+        style={{ background: C.card, border: `1px solid ${C.border}` }}>
+        <div className="flex items-start justify-between mb-5">
+          <div>
+            {subtitle && <div className="text-[10px] upper font-semibold" style={{ color: C.mute }}>{subtitle}</div>}
+            <div className="disp text-xl font-bold mt-1">{title}</div>
+          </div>
+          <button onClick={onClose} className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: C.cardSoft }}>
+            <X size={16} style={{ color: C.inkSoft }} />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+const MEAL_PRESETS = ['早餐', '午餐', '晚餐', '點心', '宵夜'];
+
+function MealModal({ mode, meal, onClose, onSave, onDelete }) {
+  const [name, setName] = useState(meal?.name || '早餐');
+  const [time, setTime] = useState(meal?.time || nowTime());
+  const [content, setContent] = useState(meal?.content || '');
+  const [calories, setCalories] = useState(meal?.calories?.toString() || '');
+  const [sodium, setSodium] = useState(meal?.sodium?.toString() || '');
+  const [sugar, setSugar] = useState(meal?.sugar?.toString() || '');
+  const [confirmDel, setConfirmDel] = useState(false);
+
+  const submit = () => {
+    if (!name.trim()) return;
+    onSave({
+      id: meal?.id || Date.now(),
+      name: name.trim(), time, content: content.trim(),
+      calories: parseFloat(calories) || 0,
+      sodium: parseFloat(sodium) || 0,
+      sugar: parseFloat(sugar) || 0,
+    });
+  };
+
+  return (
+    <ModalShell title={mode === 'new' ? '新增一餐' : '編輯餐點'} subtitle="餐點紀錄" onClose={onClose}>
+      <FieldLabel>名稱</FieldLabel>
+      <div className="flex gap-1.5 flex-wrap mt-2 mb-2">
+        {MEAL_PRESETS.map(p => (
+          <button key={p} onClick={() => setName(p)}
+            className="px-3 py-1.5 text-xs rounded-lg font-semibold transition-colors"
+            style={{
+              background: name === p ? C.flame : C.cardSoft,
+              color: name === p ? 'white' : C.mute,
+              border: `1px solid ${name === p ? C.flame : C.borderSoft}`,
+            }}>{p}</button>
+        ))}
+      </div>
+      <InputUnderline value={name} onChange={setName} placeholder="或自行命名" />
+
+      <div className="grid grid-cols-2 gap-4 mt-5">
+        <div>
+          <FieldLabel>時間</FieldLabel>
+          <input type="time" value={time} onChange={e => setTime(e.target.value)}
+            className="block mt-2 text-base num bg-transparent outline-none pb-2 w-full"
+            style={{ borderBottom: `1.5px solid ${C.border}`, color: C.ink }} />
+        </div>
+      </div>
+
+      <div className="mt-5">
+        <FieldLabel>吃了什麼</FieldLabel>
+        <textarea value={content} onChange={e => setContent(e.target.value)}
+          placeholder="例：鮪魚三明治、無糖豆漿&#10;雞腿便當（飯吃半碗）" rows={3}
+          className="w-full text-sm p-3 mt-2 rounded-xl outline-none resize-none leading-relaxed"
+          style={{ background: C.cardSoft, border: `1px solid ${C.borderSoft}`, color: C.ink }} />
+      </div>
+
+      <div className="mt-5">
+        <div className="flex items-center gap-2 mb-2">
+          <Flame size={11} style={{ color: C.flame }} />
+          <div className="text-[10px] upper font-bold" style={{ color: C.flame }}>營養（選填）</div>
+        </div>
+        <div className="grid grid-cols-3 gap-3">
+          <NutInput label="熱量" unit="kcal" value={calories} onChange={setCalories} />
+          <NutInput label="鈉" unit="mg" value={sodium} onChange={setSodium} />
+          <NutInput label="糖" unit="g" value={sugar} onChange={setSugar} />
+        </div>
+      </div>
+
+      <ActionBar
+        canSubmit={!!name.trim()}
+        onSubmit={submit}
+        submitText={mode === 'new' ? '記錄' : '儲存'}
+        showDelete={mode === 'edit'}
+        confirmDel={confirmDel} setConfirmDel={setConfirmDel}
+        onDelete={() => onDelete(meal.id)}
+      />
+    </ModalShell>
+  );
+}
+
+const DRINK_PRESETS = [250, 350, 500, 700];
+
+function DrinkModal({ mode, drink, onClose, onSave, onDelete }) {
+  const [name, setName] = useState(drink?.name || '');
+  const [amount, setAmount] = useState(drink?.amount?.toString() || '');
+  const [time, setTime] = useState(drink?.time || nowTime());
+  const [calories, setCalories] = useState(drink?.calories?.toString() || '');
+  const [sodium, setSodium] = useState(drink?.sodium?.toString() || '');
+  const [sugar, setSugar] = useState(drink?.sugar?.toString() || '');
+  const [confirmDel, setConfirmDel] = useState(false);
+
+  const submit = () => {
+    const a = parseInt(amount, 10);
+    if (!name.trim() || !a || a <= 0) return;
+    onSave({
+      id: drink?.id || Date.now(),
+      name: name.trim(), amount: a, time,
+      calories: parseFloat(calories) || 0,
+      sodium: parseFloat(sodium) || 0,
+      sugar: parseFloat(sugar) || 0,
+    });
+  };
+
+  return (
+    <ModalShell title={mode === 'new' ? '新增飲料' : '編輯飲料'} subtitle="飲料紀錄" onClose={onClose}>
+      <FieldLabel>名稱</FieldLabel>
+      <InputUnderline value={name} onChange={setName} placeholder="例：冰美式 / 珍奶 / 燕麥拿鐵" autoFocus />
+
+      <div className="mt-5">
+        <FieldLabel>容量 (cc)</FieldLabel>
+        <div className="flex items-baseline gap-2 mt-2 pb-2" style={{ borderBottom: `1.5px solid ${C.border}` }}>
+          <input type="number" inputMode="numeric" value={amount}
+            onChange={e => setAmount(e.target.value)} placeholder="例：350"
+            className="flex-1 disp text-3xl font-bold num bg-transparent outline-none"
+            style={{ color: C.ink }} />
+          <div style={{ color: C.mute }}>cc</div>
+        </div>
+        <div className="flex gap-1.5 flex-wrap mt-3">
+          {DRINK_PRESETS.map(p => (
+            <button key={p} onClick={() => setAmount(p.toString())}
+              className="px-3 py-1.5 text-xs rounded-lg num font-semibold transition-colors"
+              style={{
+                background: parseInt(amount) === p ? C.flame : C.cardSoft,
+                color: parseInt(amount) === p ? 'white' : C.mute,
+                border: `1px solid ${parseInt(amount) === p ? C.flame : C.borderSoft}`,
+              }}>{p} cc</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-5">
+        <FieldLabel>時間</FieldLabel>
+        <input type="time" value={time} onChange={e => setTime(e.target.value)}
+          className="block mt-2 text-base num bg-transparent outline-none pb-2"
+          style={{ borderBottom: `1.5px solid ${C.border}`, color: C.ink }} />
+      </div>
+
+      <div className="mt-5">
+        <div className="flex items-center gap-2 mb-2">
+          <Flame size={11} style={{ color: C.flame }} />
+          <div className="text-[10px] upper font-bold" style={{ color: C.flame }}>營養（選填）</div>
+        </div>
+        <div className="grid grid-cols-3 gap-3">
+          <NutInput label="熱量" unit="kcal" value={calories} onChange={setCalories} />
+          <NutInput label="鈉" unit="mg" value={sodium} onChange={setSodium} />
+          <NutInput label="糖" unit="g" value={sugar} onChange={setSugar} />
+        </div>
+      </div>
+
+      <ActionBar
+        canSubmit={!!name.trim() && !!amount && parseInt(amount) > 0}
+        onSubmit={submit}
+        submitText={mode === 'new' ? '記錄' : '儲存'}
+        showDelete={mode === 'edit'}
+        confirmDel={confirmDel} setConfirmDel={setConfirmDel}
+        onDelete={() => onDelete(drink.id)}
+      />
+    </ModalShell>
+  );
+}
+
+function CustomWaterModal({ current, onClose, onSet }) {
+  const [val, setVal] = useState(current.toString());
+  return (
+    <ModalShell title="設定今日喝水量" subtitle="覆寫總量" onClose={onClose}>
+      <div className="flex items-baseline gap-2 pb-2" style={{ borderBottom: `1.5px solid ${C.border}` }}>
+        <input type="number" inputMode="numeric" value={val} onChange={e => setVal(e.target.value)} autoFocus
+          className="flex-1 disp text-3xl font-bold num bg-transparent outline-none"
+          style={{ color: C.ink }} />
+        <div style={{ color: C.mute }}>cc</div>
+      </div>
+      <button onClick={() => onSet(parseInt(val) || 0)}
+        className="w-full mt-6 py-3 rounded-xl font-bold text-white upper text-sm"
+        style={{ background: C.flame, boxShadow: '0 6px 20px rgba(255,107,31,.35)' }}>
+        套用
+      </button>
+    </ModalShell>
+  );
+}
+
+function EditEntryModal({ entry, onClose, onSave, onDelete }) {
+  const [weight, setWeight] = useState(entry.weight.toString());
+  const [note, setNote] = useState(entry.note || '');
+  const [confirmDel, setConfirmDel] = useState(false);
+  return (
+    <ModalShell title="編輯紀錄" subtitle={`${fmtDate(entry.date, true)} · 星期${dayOfWeek(entry.date)}`} onClose={onClose}>
+      <FieldLabel>體重</FieldLabel>
+      <div className="flex items-baseline gap-2 mt-2 pb-2" style={{ borderBottom: `1.5px solid ${C.border}` }}>
+        <input type="number" step="0.1" inputMode="decimal" value={weight}
+          onChange={e => setWeight(e.target.value)} autoFocus
+          className="flex-1 disp text-3xl font-bold num bg-transparent outline-none"
+          style={{ color: C.ink }} />
+        <div style={{ color: C.mute }}>kg</div>
+      </div>
+
+      <div className="mt-5">
+        <FieldLabel>備註</FieldLabel>
+        <textarea value={note} onChange={e => setNote(e.target.value)}
+          placeholder="當天的飲食、運動、心情⋯" rows={3}
+          className="w-full text-sm p-3 mt-2 rounded-xl outline-none resize-none"
+          style={{ background: C.cardSoft, border: `1px solid ${C.borderSoft}`, color: C.ink }} />
+      </div>
+
+      <ActionBar
+        canSubmit={parseFloat(weight) > 0}
+        onSubmit={() => { const w = parseFloat(weight); if (w > 0) onSave(entry.id, { weight: w, note }); }}
+        submitText="儲存"
+        showDelete={true}
+        confirmDel={confirmDel} setConfirmDel={setConfirmDel}
+        onDelete={() => onDelete(entry.id)}
+      />
+    </ModalShell>
+  );
+}
+
+// ============================================================
+// Form helpers
+// ============================================================
+function FieldLabel({ children, right }) {
+  return (
+    <div className="flex items-baseline justify-between">
+      <label className="text-[10px] upper font-semibold" style={{ color: C.mute }}>{children}</label>
+      {right}
+    </div>
+  );
+}
+
+function InputUnderline({ value, onChange, placeholder, autoFocus, type = 'text' }) {
+  return (
+    <input type={type} value={value} onChange={e => onChange(e.target.value)}
+      placeholder={placeholder} autoFocus={autoFocus}
+      className="w-full text-base bg-transparent outline-none pb-2 mt-2"
+      style={{ borderBottom: `1.5px solid ${C.border}`, color: C.ink }} />
+  );
+}
+
+function NutInput({ label, unit, value, onChange }) {
+  return (
+    <div>
+      <div className="text-[10px] upper font-semibold mb-1" style={{ color: C.mute }}>{label}</div>
+      <div className="flex items-baseline gap-1 pb-1.5" style={{ borderBottom: `1.5px solid ${C.border}` }}>
+        <input type="number" inputMode="decimal" value={value}
+          onChange={e => onChange(e.target.value)} placeholder="0"
+          className="w-full disp text-xl font-bold num bg-transparent outline-none"
+          style={{ color: C.ink }} />
+        <div className="text-[10px]" style={{ color: C.mute }}>{unit}</div>
+      </div>
+    </div>
+  );
+}
+
+function ActionBar({ canSubmit, onSubmit, submitText, showDelete, confirmDel, setConfirmDel, onDelete }) {
+  return (
+    <div className="flex gap-2 mt-6">
+      {showDelete && !confirmDel && (
+        <button onClick={() => setConfirmDel(true)}
+          className="w-12 h-12 rounded-xl flex items-center justify-center"
+          style={{ background: C.cardSoft, border: `1px solid ${C.borderSoft}` }}>
+          <Trash2 size={17} style={{ color: C.ember }} />
+        </button>
+      )}
+      {confirmDel ? (
+        <>
+          <button onClick={() => setConfirmDel(false)} className="flex-1 py-3 rounded-xl font-semibold" style={{ background: C.cardSoft, color: C.ink }}>取消</button>
+          <button onClick={onDelete} className="flex-1 py-3 rounded-xl font-bold text-white" style={{ background: C.ember }}>確定刪除</button>
+        </>
+      ) : (
+        <button onClick={onSubmit} disabled={!canSubmit}
+          className="flex-1 py-3 rounded-xl font-bold text-white disabled:opacity-30 upper text-sm"
+          style={{ background: C.flame, boxShadow: '0 6px 20px rgba(255,107,31,.35)' }}>
+          {submitText}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// SETUP
+// ============================================================
+function SetupView({ onComplete }) {
+  const [name, setName] = useState('');
+  const [height, setHeight] = useState('');
+  const [current, setCurrent] = useState('');
+  const [target, setTarget] = useState('');
+
+  const tgtSuggestion = useMemo(() => suggestTarget(height), [height]);
+  const calSuggestion = useMemo(() => {
+    if (!current || !height) return null;
+    return suggestCalories(current, height);
+  }, [current, height]);
+
+  const canSubmit = name.trim() &&
+    height && parseFloat(height) >= 100 && parseFloat(height) <= 250 &&
+    target && parseFloat(target) > 20;
+
+  return (
+    <div className="pt-6 slide-up">
+      <div className="flex items-center gap-2 mb-3">
+        <Flame size={16} style={{ color: C.flame }} className="flicker" strokeWidth={2.5} />
+        <div className="text-[11px] upper font-bold" style={{ color: C.flame }}>READY TO BURN</div>
+      </div>
+      <div className="disp text-5xl font-bold leading-none">出發！</div>
+      <div className="text-sm mt-3 leading-relaxed" style={{ color: C.inkSoft }}>
+        先讓我們認識你。<br />這些資訊用來計算每日參考值。
+      </div>
+
+      <div className="mt-8 space-y-6">
+        <div>
+          <FieldLabel>姓名</FieldLabel>
+          <InputUnderline value={name} onChange={setName} placeholder="想被怎麼稱呼？" />
+        </div>
+
+        <div>
+          <FieldLabel>身高</FieldLabel>
+          <div className="flex items-baseline gap-2 mt-2 pb-2" style={{ borderBottom: `1.5px solid ${C.border}` }}>
+            <input type="number" inputMode="decimal" value={height}
+              onChange={e => setHeight(e.target.value)} placeholder="例：165"
+              className="flex-1 disp text-3xl font-bold num bg-transparent outline-none"
+              style={{ color: C.ink }} />
+            <div style={{ color: C.mute }}>cm</div>
+          </div>
+        </div>
+
+        <div>
+          <FieldLabel>目前體重</FieldLabel>
+          <div className="flex items-baseline gap-2 mt-2 pb-2" style={{ borderBottom: `1.5px solid ${C.border}` }}>
+            <input type="number" step="0.1" inputMode="decimal" value={current}
+              onChange={e => setCurrent(e.target.value)} placeholder="例：65.0"
+              className="flex-1 disp text-3xl font-bold num bg-transparent outline-none"
+              style={{ color: C.ink }} />
+            <div style={{ color: C.mute }}>kg</div>
+          </div>
+        </div>
+
+        <div>
+          <FieldLabel>
+            目標體重
+          </FieldLabel>
+          <div className="flex items-baseline gap-2 mt-2 pb-2" style={{ borderBottom: `1.5px solid ${C.border}` }}>
+            <input type="number" step="0.1" inputMode="decimal" value={target}
+              onChange={e => setTarget(e.target.value)} placeholder="例：58.0"
+              className="flex-1 disp text-3xl font-bold num bg-transparent outline-none"
+              style={{ color: C.ink }} />
+            <div style={{ color: C.mute }}>kg</div>
+          </div>
+
+          {tgtSuggestion && (
+            <div className="mt-3 rounded-xl p-3.5 pop"
+              style={{ background: C.cardSoft, border: `1px solid ${C.border}` }}>
+              <div className="flex items-center gap-1.5 mb-2">
+                <Zap size={11} style={{ color: C.flame }} />
+                <div className="text-[10px] upper font-bold" style={{ color: C.flame }}>依身高建議</div>
+              </div>
+              <button onClick={() => setTarget(tgtSuggestion.recommended.toString())}
+                className="w-full text-left flex items-center justify-between active:opacity-70">
+                <div className="flex items-baseline gap-1.5">
+                  <span className="disp text-2xl font-bold num" style={{ color: C.flame }}>
+                    {tgtSuggestion.recommended}
+                  </span>
+                  <span className="text-xs" style={{ color: C.mute }}>kg</span>
+                  <span className="text-[10px] upper ml-1.5" style={{ color: C.dim }}>BMI 22</span>
+                </div>
+                <span className="text-[10px] px-2.5 py-1 rounded-lg font-bold upper"
+                  style={{ background: C.flame, color: 'white' }}>使用</span>
+              </button>
+              <div className="text-[10px] mt-2 num" style={{ color: C.dim }}>
+                健康範圍 {tgtSuggestion.min} – {tgtSuggestion.max} kg
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Daily reference preview */}
+      {calSuggestion && (
+        <div className="mt-7 rounded-xl p-4 pop"
+          style={{ background: `linear-gradient(135deg, ${C.cardSoft} 0%, ${C.cardLift} 100%)`, border: `1px solid ${C.border}` }}>
+          <div className="flex items-center gap-2 mb-3">
+            <Flame size={12} style={{ color: C.flame }} />
+            <div className="text-[10px] upper font-bold" style={{ color: C.flame }}>每日參考值</div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <RefStat label="熱量" value={calSuggestion} unit="kcal" />
+            <RefStat label="鈉" value={DEFAULT_SODIUM_GOAL} unit="mg" />
+            <RefStat label="糖" value={DEFAULT_SUGAR_GOAL} unit="g" />
+            <RefStat label="水" value={DEFAULT_WATER_GOAL} unit="cc" />
+          </div>
+          <div className="text-[10px] mt-3" style={{ color: C.dim }}>
+            可在「設定」隨時調整
+          </div>
+        </div>
+      )}
+
+      <button onClick={() => canSubmit && onComplete({ name, height, currentWeight: current, targetWeight: target })}
+        disabled={!canSubmit}
+        className="w-full mt-8 py-4 rounded-xl text-base font-bold transition-all active:scale-[0.98] disabled:opacity-30 upper"
+        style={{ background: C.flame, color: 'white', boxShadow: canSubmit ? '0 8px 24px rgba(255,107,31,.45)' : 'none' }}>
+        開始燃燒 🔥
+      </button>
+    </div>
+  );
+}
+
+function RefStat({ label, value, unit }) {
+  return (
+    <div>
+      <div className="text-[10px] upper" style={{ color: C.mute }}>{label}</div>
+      <div className="flex items-baseline gap-1 mt-0.5">
+        <span className="disp text-xl font-bold num" style={{ color: C.ink }}>{value}</span>
+        <span className="text-[10px]" style={{ color: C.mute }}>{unit}</span>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SETTINGS
+// ============================================================
+function SettingsView({ goal, entries, diary, onBack, onSave, onReset }) {
+  const [name, setName] = useState(goal?.name || '');
+  const [height, setHeight] = useState((goal?.height || '').toString());
+  const [start, setStart] = useState(goal?.startWeight?.toString() || '');
+  const [target, setTarget] = useState(goal?.targetWeight?.toString() || '');
+  const [calorieGoal, setCalorieGoal] = useState((goal?.calorieGoal || DEFAULT_CALORIE_GOAL).toString());
+  const [sodiumGoal, setSodiumGoal] = useState((goal?.sodiumGoal || DEFAULT_SODIUM_GOAL).toString());
+  const [sugarGoal, setSugarGoal] = useState((goal?.sugarGoal || DEFAULT_SUGAR_GOAL).toString());
+  const [waterGoal, setWaterGoal] = useState((goal?.waterGoal || DEFAULT_WATER_GOAL).toString());
+  const [confirmReset, setConfirmReset] = useState(false);
+  const diaryDays = Object.keys(diary || {}).length;
+  const [gasUrl, setGasUrl] = useState(cloudStorage.gasUrl);
+  const [savedGas, setSavedGas] = useState(false);
+  const tgtSugg = useMemo(() => suggestTarget(height), [height]);
+  const calSugg = useMemo(() => {
+    if (!start || !height) return null;
+    return suggestCalories(start, height);
+  }, [start, height]);
+
+  return (
+    <div className="slide-up">
+      <div className="flex items-center justify-between mb-6">
+        <button onClick={onBack} className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+          <X size={16} style={{ color: C.inkSoft }} />
+        </button>
+        <div className="disp text-xl font-bold">設定</div>
+        <button
+          onClick={() => {
+            const h = parseFloat(height), t = parseFloat(target);
+            const cg = parseInt(calorieGoal), sg = parseInt(sodiumGoal), sug = parseFloat(sugarGoal), wg = parseInt(waterGoal);
+            if (t > 0 && h > 0 && cg > 0 && wg > 0) {
+              onSave({
+                ...goal,
+                name: name.trim() || goal?.name || '',
+                height: h, startWeight: start ? parseFloat(start) : null,
+                targetWeight: t,
+                calorieGoal: cg, sodiumGoal: sg, sugarGoal: sug, waterGoal: wg,
+              });
+              onBack();
+            }
+          }}
+          className="text-sm font-bold upper" style={{ color: C.flame }}>儲存</button>
+      </div>
+
+      <SettingsGroup label="個人">
+        <SettingField label="姓名">
+          <input value={name} onChange={e => setName(e.target.value)}
+            className="flex-1 text-xl font-bold bg-transparent outline-none" style={{ color: C.ink }} />
+        </SettingField>
+        <SettingField label="身高" unit="cm">
+          <input type="number" inputMode="decimal" value={height} onChange={e => setHeight(e.target.value)}
+            className="flex-1 disp text-xl font-bold num bg-transparent outline-none" style={{ color: C.ink }} />
+        </SettingField>
+      </SettingsGroup>
+
+      <SettingsGroup label="體重目標">
+        <SettingField label="目前體重 (選填)" unit="kg">
+          <input type="number" step="0.1" inputMode="decimal" value={start} onChange={e => setStart(e.target.value)} placeholder="未設定"
+            className="flex-1 disp text-xl font-bold num bg-transparent outline-none" style={{ color: C.ink }} />
+        </SettingField>
+        <SettingField label="目標體重" unit="kg" right={tgtSugg && (
+          <button onClick={() => setTarget(tgtSugg.recommended.toString())}
+            className="text-[10px] num flex items-center gap-1 upper font-bold" style={{ color: C.flame }}>
+            <Zap size={9} /> 建議 {tgtSugg.recommended}
+          </button>
+        )}>
+          <input type="number" step="0.1" inputMode="decimal" value={target} onChange={e => setTarget(e.target.value)}
+            className="flex-1 disp text-xl font-bold num bg-transparent outline-none" style={{ color: C.ink }} />
+        </SettingField>
+      </SettingsGroup>
+
+      <SettingsGroup label="每日參考值">
+        <SettingField label="熱量" unit="kcal" right={calSugg && (
+          <button onClick={() => setCalorieGoal(calSugg.toString())}
+            className="text-[10px] num flex items-center gap-1 upper font-bold" style={{ color: C.flame }}>
+            <Zap size={9} /> 建議 {calSugg}
+          </button>
+        )}>
+          <input type="number" inputMode="numeric" value={calorieGoal} onChange={e => setCalorieGoal(e.target.value)}
+            className="flex-1 disp text-xl font-bold num bg-transparent outline-none" style={{ color: C.ink }} />
+        </SettingField>
+        <SettingField label="鈉" unit="mg">
+          <input type="number" inputMode="numeric" value={sodiumGoal} onChange={e => setSodiumGoal(e.target.value)}
+            className="flex-1 disp text-xl font-bold num bg-transparent outline-none" style={{ color: C.ink }} />
+        </SettingField>
+        <SettingField label="糖" unit="g">
+          <input type="number" inputMode="decimal" value={sugarGoal} onChange={e => setSugarGoal(e.target.value)}
+            className="flex-1 disp text-xl font-bold num bg-transparent outline-none" style={{ color: C.ink }} />
+        </SettingField>
+        <SettingField label="喝水" unit="cc">
+          <input type="number" inputMode="numeric" value={waterGoal} onChange={e => setWaterGoal(e.target.value)}
+            className="flex-1 disp text-xl font-bold num bg-transparent outline-none" style={{ color: C.ink }} />
+        </SettingField>
+      </SettingsGroup>
+
+      <SettingsGroup label="雲端同步">
+        <div>
+          <div className="flex items-baseline justify-between">
+            <label className="text-[10px] upper font-semibold" style={{ color: C.mute }}>Apps Script 網址</label>
+            {cloudStorage.gasUrl && (
+              <span className="text-[10px] upper font-bold flex items-center gap-1" style={{ color: C.ok }}>
+                <Check size={9} strokeWidth={3} /> 已連線
+              </span>
+            )}
+          </div>
+          <textarea value={gasUrl} onChange={e => { setGasUrl(e.target.value); setSavedGas(false); }}
+            placeholder="https://script.google.com/macros/s/.../exec"
+            rows={2} spellCheck={false}
+            className="w-full text-[11px] p-2.5 mt-2 rounded-lg outline-none resize-none"
+            style={{ background: C.cardSoft, border: `1px solid ${C.borderSoft}`, color: C.ink, fontFamily: 'ui-monospace, monospace', wordBreak: 'break-all' }} />
+          <div className="flex gap-2 mt-2">
+            <button onClick={() => {
+                cloudStorage.setGasUrl(gasUrl);
+                setSavedGas(true);
+                setTimeout(() => window.location.reload(), 600);
+              }}
+              className="flex-1 py-2 text-xs rounded-lg font-bold text-white upper"
+              style={{ background: C.flame }}>
+              {savedGas ? '已儲存 · 重新載入中' : '儲存並同步'}
+            </button>
+            {cloudStorage.gasUrl && (
+              <button onClick={() => {
+                if (confirm('確定要中斷雲端同步？資料會保留在這台裝置。')) {
+                  cloudStorage.setGasUrl('');
+                  setGasUrl('');
+                  setSavedGas(false);
+                }
+              }}
+                className="px-3 py-2 text-xs rounded-lg font-bold upper"
+                style={{ background: C.cardSoft, color: C.ember, border: `1px solid ${C.border}` }}>
+                中斷
+              </button>
+            )}
+          </div>
+          <div className="text-[10px] mt-2 leading-relaxed" style={{ color: C.dim }}>
+            部署 Google Apps Script 後，把網址貼到這裡。資料會自動同步到你的 Google 試算表，所有裝置可同步。
+          </div>
+        </div>
+      </SettingsGroup>
+
+      <div className="mt-6">
+        <div className="text-[11px] upper font-semibold mb-2" style={{ color: C.mute }}>資料</div>
+        <div className="rounded-xl p-5 text-sm space-y-2" style={{ background: C.card, border: `1px solid ${C.border}`, color: C.ink }}>
+          <DataRow label="體重紀錄" value={`${entries.length} 筆`} />
+          <DataRow label="飲食紀錄" value={`${diaryDays} 天`} />
+          {goal?.startDate && <DataRow label="開始日期" value={fmtDate(goal.startDate, true)} />}
+        </div>
+      </div>
+
+      <div className="mt-6">
+        {!confirmReset ? (
+          <button onClick={() => setConfirmReset(true)} className="w-full py-3 text-sm rounded-xl font-semibold upper"
+            style={{ color: C.ember, border: `1px solid ${C.border}`, background: C.card }}>
+            清除所有資料
+          </button>
+        ) : (
+          <div className="rounded-xl p-5" style={{ background: C.card, border: `1px solid ${C.ember}` }}>
+            <div className="text-sm font-bold mb-3" style={{ color: C.ember }}>確定要刪除全部紀錄嗎？此動作無法復原。</div>
+            <div className="flex gap-2">
+              <button onClick={() => setConfirmReset(false)} className="flex-1 py-2.5 text-sm rounded-lg font-semibold" style={{ background: C.cardSoft, color: C.ink }}>取消</button>
+              <button onClick={() => { onReset(); setConfirmReset(false); }} className="flex-1 py-2.5 text-sm rounded-lg font-bold text-white" style={{ background: C.ember }}>確定刪除</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SettingsGroup({ label, children }) {
+  return (
+    <div className="mb-5">
+      <div className="text-[11px] upper font-semibold mb-2" style={{ color: C.mute }}>{label}</div>
+      <div className="rounded-xl p-5 space-y-4" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function SettingField({ label, unit, right, children }) {
+  return (
+    <div>
+      <div className="flex items-baseline justify-between">
+        <label className="text-[10px] upper font-semibold" style={{ color: C.mute }}>{label}</label>
+        {right}
+      </div>
+      <div className="flex items-baseline gap-2 mt-1.5 pb-2" style={{ borderBottom: `1px solid ${C.borderSoft}` }}>
+        {children}
+        {unit && <div className="text-sm" style={{ color: C.mute }}>{unit}</div>}
+      </div>
+    </div>
+  );
+}
+
+function DataRow({ label, value }) {
+  return (
+    <div className="flex justify-between">
+      <span style={{ color: C.mute }}>{label}</span>
+      <span className="num font-semibold">{value}</span>
+    </div>
+  );
+}
+
+// ============================================================
+// EXPORT VIEW (PDF print + Excel)
+// ============================================================
+function ExportView({ goal, entries, diary, from, setFrom, to, setTo, onBack, showToast }) {
+  const inRange = (date) => date >= from && date <= to;
+
+  const filtered = useMemo(() => {
+    const w = entries.filter(e => inRange(e.date)).sort((a, b) => a.date.localeCompare(b.date));
+    const days = Object.keys(diary || {}).filter(d => inRange(d)).sort();
+    const diaryRows = days.map(d => ({ date: d, ...diary[d] }));
+    return { weights: w, diary: diaryRows, days };
+  }, [entries, diary, from, to]);
+
+  const printReport = () => {
+    window.print();
+  };
+
+  const exportExcel = () => {
+    try {
+      const wb = XLSX.utils.book_new();
+
+      // Sheet 1: Summary
+      const summaryRows = [
+        ['減重日誌 匯出資料'],
+        [],
+        ['姓名', goal?.name || ''],
+        ['身高 (cm)', goal?.height || ''],
+        ['目標體重 (kg)', goal?.targetWeight || ''],
+        ['起始體重 (kg)', goal?.startWeight ?? ''],
+        ['日期範圍', `${from} ~ ${to}`],
+        ['每日熱量目標 (kcal)', goal?.calorieGoal || DEFAULT_CALORIE_GOAL],
+        ['每日鈉目標 (mg)', goal?.sodiumGoal || DEFAULT_SODIUM_GOAL],
+        ['每日糖目標 (g)', goal?.sugarGoal || DEFAULT_SUGAR_GOAL],
+        ['每日喝水目標 (cc)', goal?.waterGoal || DEFAULT_WATER_GOAL],
+      ];
+      const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
+      wsSummary['!cols'] = [{ wch: 22 }, { wch: 28 }];
+      XLSX.utils.book_append_sheet(wb, wsSummary, '摘要');
+
+      // Sheet 2: Weight log
+      if (filtered.weights.length) {
+        const wRows = [['日期', '星期', '體重 (kg)', '備註'],
+          ...filtered.weights.map(e => [e.date, '星期' + dayOfWeek(e.date), e.weight, e.note || ''])];
+        const wsW = XLSX.utils.aoa_to_sheet(wRows);
+        wsW['!cols'] = [{ wch: 12 }, { wch: 8 }, { wch: 10 }, { wch: 40 }];
+        XLSX.utils.book_append_sheet(wb, wsW, '體重');
+      }
+
+      // Sheet 3: Meals
+      const mealRows = [['日期', '星期', '名稱', '時間', '吃了什麼', '熱量(kcal)', '鈉(mg)', '糖(g)']];
+      filtered.diary.forEach(d => {
+        (d.meals || []).forEach(m => {
+          mealRows.push([d.date, '星期'+dayOfWeek(d.date), m.name||'', m.time||'', m.content||'',
+            m.calories||0, m.sodium||0, m.sugar||0]);
+        });
+      });
+      if (mealRows.length > 1) {
+        const wsM = XLSX.utils.aoa_to_sheet(mealRows);
+        wsM['!cols'] = [{ wch: 12 }, { wch: 8 }, { wch: 10 }, { wch: 8 }, { wch: 40 }, { wch: 12 }, { wch: 10 }, { wch: 10 }];
+        XLSX.utils.book_append_sheet(wb, wsM, '餐點');
+      }
+
+      // Sheet 4: Drinks
+      const drinkRows = [['日期', '星期', '名稱', '容量(cc)', '時間', '熱量(kcal)', '鈉(mg)', '糖(g)']];
+      filtered.diary.forEach(d => {
+        (d.drinks || []).forEach(dr => {
+          drinkRows.push([d.date, '星期'+dayOfWeek(d.date), dr.name||'', dr.amount||0, dr.time||'',
+            dr.calories||0, dr.sodium||0, dr.sugar||0]);
+        });
+      });
+      if (drinkRows.length > 1) {
+        const wsD = XLSX.utils.aoa_to_sheet(drinkRows);
+        wsD['!cols'] = [{ wch: 12 }, { wch: 8 }, { wch: 18 }, { wch: 10 }, { wch: 8 }, { wch: 12 }, { wch: 10 }, { wch: 10 }];
+        XLSX.utils.book_append_sheet(wb, wsD, '飲料');
+      }
+
+      // Sheet 5: Water & daily totals
+      const dailyRows = [['日期', '星期', '喝水(cc)', '熱量總計(kcal)', '鈉總計(mg)', '糖總計(g)']];
+      filtered.diary.forEach(d => {
+        const sum = (items, key) => (items || []).reduce((s, x) => s + (parseFloat(x[key]) || 0), 0);
+        const cal = sum(d.meals, 'calories') + sum(d.drinks, 'calories');
+        const sod = sum(d.meals, 'sodium') + sum(d.drinks, 'sodium');
+        const sug = sum(d.meals, 'sugar') + sum(d.drinks, 'sugar');
+        dailyRows.push([d.date, '星期'+dayOfWeek(d.date), d.water||0, Math.round(cal), Math.round(sod), Math.round(sug*10)/10]);
+      });
+      if (dailyRows.length > 1) {
+        const wsDay = XLSX.utils.aoa_to_sheet(dailyRows);
+        wsDay['!cols'] = [{ wch: 12 }, { wch: 8 }, { wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 12 }];
+        XLSX.utils.book_append_sheet(wb, wsDay, '每日總計');
+      }
+
+      const fileName = `減重日誌_${from}_${to}.xlsx`;
+      XLSX.writeFile(wb, fileName);
+      showToast('已下載 Excel');
+    } catch (e) {
+      console.error(e);
+      showToast('匯出失敗');
+    }
+  };
+
+  // Summary for preview
+  const sum = (items, key) => (items || []).reduce((s, x) => s + (parseFloat(x[key]) || 0), 0);
+  const totalCal = filtered.diary.reduce((s, d) => s + sum(d.meals, 'calories') + sum(d.drinks, 'calories'), 0);
+  const avgCal = filtered.days.length ? Math.round(totalCal / filtered.days.length) : 0;
+
+  return (
+    <>
+      <div className="slide-up">
+        <div className="flex items-center justify-between mb-6">
+          <button onClick={onBack} className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+            <X size={16} style={{ color: C.inkSoft }} />
+          </button>
+          <div className="disp text-xl font-bold">匯出資料</div>
+          <div className="w-9" />
+        </div>
+
+        <div className="rounded-xl p-5 mb-5" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+          <div className="text-[11px] upper font-semibold mb-3" style={{ color: C.mute }}>日期範圍</div>
+          <div className="space-y-3">
+            <div>
+              <div className="text-[10px] upper mb-1" style={{ color: C.dim }}>從</div>
+              <input type="date" value={from} max={to} onChange={e => setFrom(e.target.value)}
+                className="w-full disp text-lg font-bold num bg-transparent outline-none pb-1.5"
+                style={{ borderBottom: `1.5px solid ${C.border}`, color: C.ink }} />
+            </div>
+            <div>
+              <div className="text-[10px] upper mb-1" style={{ color: C.dim }}>到</div>
+              <input type="date" value={to} min={from} max={todayStr()} onChange={e => setTo(e.target.value)}
+                className="w-full disp text-lg font-bold num bg-transparent outline-none pb-1.5"
+                style={{ borderBottom: `1.5px solid ${C.border}`, color: C.ink }} />
+            </div>
+          </div>
+          <div className="flex gap-2 mt-4">
+            {[{ d: 7, l: '7天' }, { d: 30, l: '30天' }, { d: 90, l: '90天' }].map(p => (
+              <button key={p.d} onClick={() => { setFrom(shiftDate(todayStr(), -(p.d - 1))); setTo(todayStr()); }}
+                className="flex-1 py-2 text-xs rounded-lg font-semibold" style={{ background: C.cardSoft, color: C.inkSoft, border: `1px solid ${C.borderSoft}` }}>
+                {p.l}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-xl p-5 mb-5" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+          <div className="text-[11px] upper font-semibold mb-3" style={{ color: C.mute }}>預覽</div>
+          <div className="space-y-2 text-sm">
+            <DataRow label="體重紀錄" value={`${filtered.weights.length} 筆`} />
+            <DataRow label="有紀錄的天數" value={`${filtered.days.length} 天`} />
+            <DataRow label="平均日熱量" value={avgCal > 0 ? `${avgCal} kcal` : '—'} />
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <button onClick={printReport}
+            className="w-full py-4 rounded-xl font-bold text-white upper flex items-center justify-center gap-2"
+            style={{ background: C.flame, boxShadow: '0 6px 20px rgba(255,107,31,.35)' }}>
+            <Printer size={16} strokeWidth={2.5} />
+            列印 / 儲存 PDF
+          </button>
+          <button onClick={exportExcel}
+            className="w-full py-4 rounded-xl font-bold upper flex items-center justify-center gap-2"
+            style={{ background: C.cardSoft, color: C.ink, border: `1px solid ${C.border}` }}>
+            <FileSpreadsheet size={16} strokeWidth={2.5} />
+            匯出 Excel (.xlsx)
+          </button>
+          <div className="text-[10px] text-center mt-2" style={{ color: C.dim }}>
+            列印對話框中可選「儲存為 PDF」
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function PrintArea({ goal, from, to, weights, diary }) {
+  const sum = (items, key) => (items || []).reduce((s, x) => s + (parseFloat(x[key]) || 0), 0);
+  return (
+    <div className="print-area" style={{ display: 'none' }}>
+      <h1>減重日誌</h1>
+      <div className="meta">
+        {goal?.name && <span>{goal.name}　·　</span>}
+        日期範圍：{from} ~ {to}　·　列印於 {todayStr()}
+      </div>
+
+      <h2>個人資料</h2>
+      <table>
+        <tbody>
+          <tr><th>姓名</th><td>{goal?.name || '—'}</td></tr>
+          <tr><th>身高</th><td>{goal?.height ? `${goal.height} cm` : '—'}</td></tr>
+          <tr><th>目標體重</th><td>{goal?.targetWeight ? `${goal.targetWeight} kg` : '—'}</td></tr>
+          <tr><th>起始體重</th><td>{goal?.startWeight ? `${goal.startWeight} kg` : '—'}</td></tr>
+          <tr><th>每日參考</th><td>熱量 {goal?.calorieGoal || DEFAULT_CALORIE_GOAL} kcal · 鈉 {goal?.sodiumGoal || DEFAULT_SODIUM_GOAL} mg · 糖 {goal?.sugarGoal || DEFAULT_SUGAR_GOAL} g · 水 {goal?.waterGoal || DEFAULT_WATER_GOAL} cc</td></tr>
+        </tbody>
+      </table>
+
+      {weights.length > 0 && (
+        <>
+          <h2>體重紀錄</h2>
+          <table>
+            <thead><tr><th>日期</th><th>星期</th><th>體重 (kg)</th><th>備註</th></tr></thead>
+            <tbody>
+              {weights.map(e => (
+                <tr key={e.id}>
+                  <td>{e.date}</td>
+                  <td>{dayOfWeek(e.date)}</td>
+                  <td>{e.weight.toFixed(1)}</td>
+                  <td>{e.note || ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      <h2>飲食日誌</h2>
+      {diary.length === 0 ? (
+        <div className="meta">範圍內無飲食紀錄</div>
+      ) : diary.map(d => {
+        const cal = sum(d.meals, 'calories') + sum(d.drinks, 'calories');
+        const sod = sum(d.meals, 'sodium') + sum(d.drinks, 'sodium');
+        const sug = sum(d.meals, 'sugar') + sum(d.drinks, 'sugar');
+        return (
+          <div key={d.date} className="day-block">
+            <h3>{d.date} 星期{dayOfWeek(d.date)}</h3>
+            <div className="meta">
+              熱量 {Math.round(cal)} kcal · 鈉 {Math.round(sod)} mg · 糖 {Math.round(sug*10)/10} g · 水 {d.water || 0} cc
+            </div>
+            {(d.meals?.length > 0 || d.drinks?.length > 0) && (
+              <table>
+                <thead><tr><th>類型</th><th>名稱</th><th>時間</th><th>內容 / 容量</th><th>熱量</th><th>鈉</th><th>糖</th></tr></thead>
+                <tbody>
+                  {(d.meals || []).map(m => (
+                    <tr key={'m'+m.id}>
+                      <td>餐點</td><td>{m.name}</td><td>{m.time||''}</td>
+                      <td>{m.content || ''}</td>
+                      <td>{m.calories || ''}</td><td>{m.sodium || ''}</td><td>{m.sugar || ''}</td>
+                    </tr>
+                  ))}
+                  {(d.drinks || []).map(dr => (
+                    <tr key={'d'+dr.id}>
+                      <td>飲料</td><td>{dr.name}</td><td>{dr.time||''}</td>
+                      <td>{dr.amount} cc</td>
+                      <td>{dr.calories || ''}</td><td>{dr.sodium || ''}</td><td>{dr.sugar || ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+
+createRoot(document.getElementById('root')).render(<WeightTracker />);
+
+// Hide loader
+if (window.__hideLoader) setTimeout(window.__hideLoader, 0);
+  </script>
+</body>
+</html>
