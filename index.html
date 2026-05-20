@@ -441,6 +441,7 @@ function WeightTracker() {
             onBack={() => setView('main')}
             onSave={async (newGoal) => { setGoal(newGoal); await persist({ goal: newGoal }); showToast('已更新'); }}
             onReset={async () => { setEntries([]); setGoal(null); setDiary({}); await persist({ entries: [], goal: null, diary: {} }); setView('setup'); }}
+            onOpenAccount={() => setShowAccount(true)}
           />
         )}
         {view === 'export' && (
@@ -542,7 +543,7 @@ function Header({ goal, tab, setTab, onOpenSettings, onOpenExport, onTripleTap }
           <div onClick={handleTitleTap}
             className="disp text-4xl font-bold mt-1.5 leading-none select-none cursor-pointer">健康日誌</div>
           <div className="text-[11px] num upper mt-1.5" style={{ color: C.mute }}>
-            {todayStr().replace(/-/g, ' / ')} · {dayOfWeek(todayStr())}
+            {todayStr().replace(/-/g, ' / ')} · 星期{dayOfWeek(todayStr())}
           </div>
         </div>
         <div className="flex flex-col gap-1.5">
@@ -1998,7 +1999,20 @@ function RefStat({ label, value, unit }) {
 // ============================================================
 // SETTINGS
 // ============================================================
-function SettingsView({ goal, entries, diary, onBack, onSave, onReset }) {
+function SettingsView({ goal, entries, diary, onBack, onSave, onReset, onOpenAccount }) {
+  const accountType = localStorage.getItem(LOCAL_ACCOUNT_TYPE) || '';
+  const isMaster = accountType === 'master';
+  const isChild = accountType === 'child';
+  const currentKey = localStorage.getItem(LOCAL_USER_KEY) || '';
+  const handleLogout = () => {
+    if (!confirm('登出後此裝置會用新的識別碼，看不到雲端資料。確定？')) return;
+    const newKey = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : ('u-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+    localStorage.setItem(LOCAL_USER_KEY, newKey);
+    localStorage.removeItem(LOCAL_ACCOUNT_TYPE);
+    window.location.reload();
+  };
   const [name, setName] = useState(goal?.name || '');
   const [height, setHeight] = useState((goal?.height || '').toString());
   const [start, setStart] = useState(goal?.startWeight?.toString() || '');
@@ -2067,6 +2081,44 @@ function SettingsView({ goal, entries, diary, onBack, onSave, onReset }) {
           <Flame size={14} strokeWidth={2.5} />
           {savedGas ? '同步中⋯' : '立即同步'}
         </button>
+
+        {/* Account status + login/logout */}
+        <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.borderSoft}` }}>
+          {(isMaster || isChild) ? (
+            <>
+              <div className="flex items-center gap-2 mb-2.5">
+                <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
+                  style={{ background: isMaster ? 'rgba(255,107,31,0.15)' : 'rgba(6,214,160,0.15)' }}>
+                  {isMaster
+                    ? <Flame size={13} strokeWidth={2.5} style={{ color: C.flame }} />
+                    : <Check size={13} strokeWidth={3} style={{ color: C.ok }} />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[10px] upper font-semibold" style={{ color: C.mute }}>
+                    {isMaster ? '母帳號' : '已登入'}
+                  </div>
+                  <div className="disp text-sm font-bold num truncate">{currentKey}</div>
+                </div>
+              </div>
+              <button onClick={handleLogout}
+                className="w-full py-2.5 text-xs rounded-xl font-bold upper"
+                style={{ background: C.cardSoft, color: C.ember, border: `1px solid ${C.border}` }}>
+                登出{isMaster ? '母帳號' : ''}
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="text-[10px] mb-2.5 leading-relaxed" style={{ color: C.dim }}>
+                登入帳號可在多裝置同步資料
+              </div>
+              <button onClick={onOpenAccount}
+                className="w-full py-2.5 text-xs rounded-xl font-bold upper"
+                style={{ background: C.cardSoft, color: C.inkSoft, border: `1px solid ${C.border}` }}>
+                登入帳號
+              </button>
+            </>
+          )}
+        </div>
       </SettingsGroup>
 
       <SettingsGroup label="個人">
