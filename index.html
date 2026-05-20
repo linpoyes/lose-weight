@@ -434,7 +434,7 @@ function WeightTracker() {
       <style>{FONT_CSS}</style>
 
       <div className="max-w-md mx-auto px-5 pt-6 pb-32 no-print">
-        {view === 'setup' && <SetupView onComplete={completeSetup} />}
+        {view === 'setup' && <SetupView onComplete={completeSetup} onLogin={() => setShowAccount(true)} />}
         {view === 'settings' && (
           <SettingsView
             goal={goal} entries={entries} diary={diary}
@@ -1842,7 +1842,7 @@ function ActionBar({ canSubmit, onSubmit, submitText, showDelete, confirmDel, se
 // ============================================================
 // SETUP
 // ============================================================
-function SetupView({ onComplete }) {
+function SetupView({ onComplete, onLogin }) {
   const [name, setName] = useState('');
   const [height, setHeight] = useState('');
   const [current, setCurrent] = useState('');
@@ -1962,6 +1962,23 @@ function SetupView({ onComplete }) {
         style={{ background: C.flame, color: 'white', boxShadow: canSubmit ? '0 8px 24px rgba(255,107,31,.45)' : 'none' }}>
         開始燃燒 🔥
       </button>
+
+      {/* Divider + login link for existing accounts */}
+      <div className="mt-6 flex items-center gap-3">
+        <div className="flex-1 h-px" style={{ background: C.border }} />
+        <div className="text-[10px] upper" style={{ color: C.dim }}>或</div>
+        <div className="flex-1 h-px" style={{ background: C.border }} />
+      </div>
+
+      <button onClick={onLogin}
+        className="w-full mt-4 py-3 rounded-xl text-sm font-bold upper flex items-center justify-center gap-2 transition-all active:scale-[0.98]"
+        style={{ background: C.cardSoft, color: C.inkSoft, border: `1px solid ${C.border}` }}>
+        <Check size={13} strokeWidth={3} style={{ color: C.ok }} />
+        已有帳號 · 登入同步
+      </button>
+      <div className="text-[10px] mt-2 text-center leading-relaxed" style={{ color: C.dim }}>
+        換手機？輸入原本的帳號密碼，<br />資料會從雲端自動載入。
+      </div>
     </div>
   );
 }
