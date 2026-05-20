@@ -75,7 +75,12 @@ import * as XLSX from 'xlsx';
 // 🔒 GAS 網址寫死在這裡，要換的話編輯此行
 const HARDCODED_GAS_URL = 'https://script.google.com/macros/s/AKfycbxQ5nbY3Zcjgp0XXYo3FTW-Ep886vmmM4qGDofb6p5fmeBh8c5N8Zv5_rxZfq0bOyPfMg/exec';
 
+// 🔒 帳號密碼（跨裝置同步用，點標題 3 下可叫出登入畫面）
+const VALID_ACCOUNT = '72839168';
+const VALID_PASSWORD = '85379150';
+
 const LOCAL_USER_KEY = 'wt-user-key';
+const LOCAL_ACCOUNT_TYPE = 'wt-account-type'; // 'master' | 'child' | '' (guest)
 
 function getUserKey() {
   let k = localStorage.getItem(LOCAL_USER_KEY);
@@ -270,6 +275,7 @@ function WeightTracker() {
   const [editingEntry, setEditingEntry] = useState(null);
   const [chartRange, setChartRange] = useState(30);
   const [toast, setToast] = useState(null);
+  const [showAccount, setShowAccount] = useState(false);
 
   const [qWeight, setQWeight] = useState('');
   const [qDate, setQDate] = useState(todayStr());
@@ -453,6 +459,7 @@ function WeightTracker() {
               tab={tab} setTab={setTab}
               onOpenSettings={() => setView('settings')}
               onOpenExport={() => setView('export')}
+              onTripleTap={() => setShowAccount(true)}
             />
             {tab === 'weight' && (
               <WeightView
@@ -482,6 +489,13 @@ function WeightTracker() {
         />
       )}
 
+      {showAccount && (
+        <AccountModal
+          onClose={() => setShowAccount(false)}
+          showToast={showToast}
+        />
+      )}
+
       {toast && (
         <div className="fixed left-1/2 -translate-x-1/2 bottom-8 px-5 py-3 rounded-full pop text-sm font-medium z-50 no-print"
           style={{ background: C.flame, color: 'white', boxShadow: '0 10px 30px rgba(255,107,31,.4)' }}>
@@ -504,7 +518,17 @@ function WeightTracker() {
 // ============================================================
 // HEADER
 // ============================================================
-function Header({ goal, tab, setTab, onOpenSettings, onOpenExport }) {
+function Header({ goal, tab, setTab, onOpenSettings, onOpenExport, onTripleTap }) {
+  const tapsRef = useRef([]);
+  const handleTitleTap = () => {
+    const now = Date.now();
+    tapsRef.current = tapsRef.current.filter(t => now - t < 800);
+    tapsRef.current.push(now);
+    if (tapsRef.current.length >= 3) {
+      tapsRef.current = [];
+      if (onTripleTap) onTripleTap();
+    }
+  };
   return (
     <div className="mb-5">
       <div className="flex items-center justify-between pt-1">
@@ -515,7 +539,8 @@ function Header({ goal, tab, setTab, onOpenSettings, onOpenExport }) {
               {goal?.name ? `HI, ${goal.name}` : 'WELCOME'}
             </div>
           </div>
-          <div className="disp text-4xl font-bold mt-1.5 leading-none">健康日誌</div>
+          <div onClick={handleTitleTap}
+            className="disp text-4xl font-bold mt-1.5 leading-none select-none cursor-pointer">健康日誌</div>
           <div className="text-[11px] num upper mt-1.5" style={{ color: C.mute }}>
             {todayStr().replace(/-/g, ' / ')} · {dayOfWeek(todayStr())}
           </div>
@@ -1379,6 +1404,379 @@ function EditEntryModal({ entry, onClose, onSave, onDelete }) {
   );
 }
 
+function AccountModal({ onClose, showToast }) {
+  const currentKey = localStorage.getItem(LOCAL_USER_KEY) || '';
+  const accountType = localStorage.getItem(LOCAL_ACCOUNT_TYPE) || '';
+  const isMaster = accountType === 'master';
+  const isChild = accountType === 'child';
+
+  const [view, setView] = useState('main'); // main | addChild | childDetail
+  const [selectedChild, setSelectedChild] = useState(null);
+
+  // Login form
+  const [loginAccount, setLoginAccount] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+
+  // Children list
+  const [children, setChildren] = useState(null); // null=loading
+
+  const loadChildren = async () => {
+    setChildren(null);
+    try {
+      const url = cloudStorage.gasUrl + '?op=listChildren&master=' + encodeURIComponent(VALID_ACCOUNT) + '&masterPw=' + encodeURIComponent(VALID_PASSWORD);
+      const resp = await fetch(url, { cache: 'no-store' });
+      const data = await resp.json();
+      setChildren(data.ok ? (data.children || []) : []);
+    } catch (e) {
+      console.warn('Load children failed', e);
+      setChildren([]);
+    }
+  };
+
+  useEffect(() => {
+    if (isMaster && children === null && view === 'main') loadChildren();
+  }, [isMaster, view]);
+
+  const handleLogin = async () => {
+    setLoginError('');
+    const a = loginAccount.trim();
+    const p = loginPassword.trim();
+    if (!a || !p) { setLoginError('請輸入帳號密碼'); return; }
+    setLoginLoading(true);
+
+    // Try master first
+    if (a === VALID_ACCOUNT && p === VALID_PASSWORD) {
+      localStorage.setItem(LOCAL_USER_KEY, VALID_ACCOUNT);
+      localStorage.setItem(LOCAL_ACCOUNT_TYPE, 'master');
+      setTimeout(() => window.location.reload(), 600);
+      return;
+    }
+
+    // Try child via GAS
+    try {
+      const url = cloudStorage.gasUrl + '?op=validateLogin&account=' + encodeURIComponent(a) + '&password=' + encodeURIComponent(p);
+      const resp = await fetch(url, { cache: 'no-store' });
+      const data = await resp.json();
+      if (data.ok) {
+        localStorage.setItem(LOCAL_USER_KEY, a);
+        localStorage.setItem(LOCAL_ACCOUNT_TYPE, 'child');
+        // Smart sync
+        try {
+          const gUrl = cloudStorage.gasUrl + '?op=get&user=' + encodeURIComponent(a);
+          const gResp = await fetch(gUrl, { cache: 'no-store' });
+          const gData = await gResp.json();
+          if (!(gData && gData.ok && gData.payload)) {
+            const current = localStorage.getItem(STORAGE_KEY);
+            if (current) {
+              await fetch(cloudStorage.gasUrl, {
+                method: 'POST', mode: 'no-cors',
+                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                body: JSON.stringify({ op: 'set', user: a, payload: JSON.parse(current) }),
+              });
+            }
+          }
+        } catch (e) { /* ignore */ }
+        setTimeout(() => window.location.reload(), 800);
+      } else {
+        setLoginError('帳號或密碼錯誤');
+        setLoginLoading(false);
+      }
+    } catch (e) {
+      setLoginError('連線錯誤，請稍後再試');
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    if (!confirm('登出後此裝置會用新的識別碼，看不到雲端資料。確定？')) return;
+    const newKey = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : ('u-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+    localStorage.setItem(LOCAL_USER_KEY, newKey);
+    localStorage.removeItem(LOCAL_ACCOUNT_TYPE);
+    window.location.reload();
+  };
+
+  // Sub-views (sub-modals when adding/viewing children)
+  if (view === 'addChild') {
+    return <AddChildModal onClose={() => setView('main')}
+      onCreated={() => { setView('main'); loadChildren(); if (showToast) showToast('子帳號已建立'); }} />;
+  }
+  if (view === 'childDetail' && selectedChild) {
+    return <ChildDetailModal child={selectedChild}
+      onClose={() => { setView('main'); setSelectedChild(null); }}
+      onDeleted={() => { setView('main'); setSelectedChild(null); loadChildren(); if (showToast) showToast('已刪除'); }} />;
+  }
+
+  // Master view
+  if (isMaster) {
+    return (
+      <ModalShell title="母帳號管理" subtitle="子帳號" onClose={onClose}>
+        <div className="rounded-xl p-3 flex items-center gap-2.5 mb-5"
+          style={{ background: 'rgba(255,107,31,0.08)', border: `1px solid rgba(255,107,31,0.25)` }}>
+          <Flame size={16} style={{ color: C.flame }} strokeWidth={2.5} className="flicker" />
+          <div className="flex-1">
+            <div className="disp text-lg font-bold num">{VALID_ACCOUNT}</div>
+            <div className="text-[10px] upper font-semibold" style={{ color: C.flame }}>母帳號 · MASTER</div>
+          </div>
+        </div>
+
+        <div className="mb-2.5 flex items-center justify-between">
+          <div className="text-[10px] upper font-semibold" style={{ color: C.mute }}>
+            子帳號 {children !== null ? `· ${children.length}` : ''}
+          </div>
+          <button onClick={() => setView('addChild')}
+            className="text-xs px-3 py-1.5 rounded-lg font-bold flex items-center gap-1 upper"
+            style={{ background: C.flame, color: 'white' }}>
+            <Plus size={11} strokeWidth={3} /> 新增
+          </button>
+        </div>
+
+        {children === null ? (
+          <div className="text-center text-sm py-8" style={{ color: C.dim }}>載入中⋯</div>
+        ) : children.length === 0 ? (
+          <div className="rounded-xl p-6 text-center" style={{ background: C.cardSoft, border: `1px dashed ${C.border}` }}>
+            <div className="text-sm" style={{ color: C.dim }}>還沒有子帳號<br />點上面「新增」建立第一個</div>
+          </div>
+        ) : (
+          <div className="rounded-xl overflow-hidden" style={{ background: C.cardSoft, border: `1px solid ${C.border}` }}>
+            {children.map((c, i) => {
+              const displayName = (c.stats && c.stats.name) || c.name || '未命名';
+              return (
+                <button key={c.account} onClick={() => { setSelectedChild(c); setView('childDetail'); }}
+                  className="w-full text-left px-4 py-3 flex items-center gap-3 active:bg-white/[.03]"
+                  style={{ borderTop: i === 0 ? 'none' : `1px solid ${C.borderSoft}` }}>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-bold text-sm truncate">{displayName}</div>
+                    <div className="text-[10px] num mt-0.5" style={{ color: C.mute }}>
+                      {c.account} · {(c.stats && c.stats.weightCount) || 0} 筆 · {(c.stats && c.stats.diaryDays) || 0} 天
+                    </div>
+                  </div>
+                  {c.stats && c.stats.latestWeight !== null && c.stats.latestWeight !== undefined && (
+                    <div className="text-right shrink-0">
+                      <div className="disp text-base font-bold num">{c.stats.latestWeight.toFixed(1)}</div>
+                      <div className="text-[9px]" style={{ color: C.mute }}>kg</div>
+                    </div>
+                  )}
+                  <ChevronRight size={14} style={{ color: C.dim }} />
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <button onClick={handleLogout}
+          className="w-full mt-6 py-2.5 text-xs rounded-xl font-bold upper"
+          style={{ background: C.cardSoft, color: C.ember, border: `1px solid ${C.border}` }}>
+          登出母帳號
+        </button>
+      </ModalShell>
+    );
+  }
+
+  // Child logged in
+  if (isChild) {
+    return (
+      <ModalShell title="帳號" subtitle="跨裝置同步" onClose={onClose}>
+        <div className="text-center mb-6">
+          <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-3"
+            style={{ background: 'rgba(6,214,160,0.15)', border: `1px solid rgba(6,214,160,0.3)` }}>
+            <Check size={28} strokeWidth={3} style={{ color: C.ok }} />
+          </div>
+          <div className="disp text-2xl font-bold" style={{ color: C.ok }}>已登入</div>
+          <div className="text-sm mt-1 num" style={{ color: C.mute }}>帳號 {currentKey}</div>
+        </div>
+        <button onClick={handleLogout}
+          className="w-full py-3 text-sm rounded-xl font-bold upper"
+          style={{ background: C.cardSoft, color: C.ember, border: `1px solid ${C.border}` }}>
+          登出此裝置
+        </button>
+      </ModalShell>
+    );
+  }
+
+  // Not logged in
+  return (
+    <ModalShell title="登入" subtitle="跨裝置同步" onClose={onClose}>
+      <div className="space-y-5">
+        <div>
+          <FieldLabel>帳號</FieldLabel>
+          <input type="text" inputMode="numeric" value={loginAccount} autoComplete="off"
+            onChange={e => { setLoginAccount(e.target.value); setLoginError(''); }}
+            placeholder="輸入帳號" autoFocus
+            className="w-full disp text-2xl font-bold num bg-transparent outline-none pb-2 mt-2"
+            style={{ borderBottom: `1.5px solid ${C.border}`, color: C.ink }} />
+        </div>
+        <div>
+          <FieldLabel>密碼</FieldLabel>
+          <input type="password" inputMode="numeric" value={loginPassword} autoComplete="off"
+            onChange={e => { setLoginPassword(e.target.value); setLoginError(''); }}
+            placeholder="輸入密碼"
+            onKeyDown={e => { if (e.key === 'Enter') handleLogin(); }}
+            className="w-full disp text-2xl font-bold num bg-transparent outline-none pb-2 mt-2"
+            style={{ borderBottom: `1.5px solid ${C.border}`, color: C.ink }} />
+        </div>
+        {loginError && (
+          <div className="text-sm font-bold pop flex items-center gap-1.5" style={{ color: C.ember }}>
+            <X size={14} strokeWidth={3} /> {loginError}
+          </div>
+        )}
+        <button onClick={handleLogin}
+          disabled={!loginAccount.trim() || !loginPassword || loginLoading}
+          className="w-full py-3 rounded-xl font-bold text-white upper disabled:opacity-30"
+          style={{ background: C.flame, boxShadow: '0 6px 20px rgba(255,107,31,.35)' }}>
+          {loginLoading ? '登入中⋯' : '登入'}
+        </button>
+        <div className="text-[10px] text-center leading-relaxed" style={{ color: C.dim }}>
+          母帳號可管理子帳號 · 同帳號跨裝置共享資料
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+function AddChildModal({ onClose, onCreated }) {
+  const [account, setAccount] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleCreate = async () => {
+    setError('');
+    const a = account.trim();
+    const p = password.trim();
+    const n = name.trim();
+    if (!a || !p || !n) { setError('請填寫所有欄位'); return; }
+    if (a === VALID_ACCOUNT) { setError('此帳號不可使用（母帳號）'); return; }
+    setLoading(true);
+    try {
+      await fetch(cloudStorage.gasUrl, {
+        method: 'POST', mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          op: 'createChild',
+          master: VALID_ACCOUNT, masterPw: VALID_PASSWORD,
+          account: a, password: p, name: n,
+        }),
+      });
+      // Wait briefly for the server to process
+      setTimeout(() => { if (onCreated) onCreated(); }, 1200);
+    } catch (e) {
+      setError('建立失敗，請稍後再試');
+      setLoading(false);
+    }
+  };
+
+  return (
+    <ModalShell title="新增子帳號" subtitle="母帳號管理" onClose={onClose}>
+      <div className="space-y-5">
+        <div>
+          <FieldLabel>名稱</FieldLabel>
+          <InputUnderline value={name} onChange={setName} placeholder="例：小明" autoFocus />
+        </div>
+        <div>
+          <FieldLabel>帳號</FieldLabel>
+          <input type="text" inputMode="numeric" value={account}
+            onChange={e => { setAccount(e.target.value); setError(''); }}
+            placeholder="設定帳號（建議數字）"
+            className="w-full disp text-2xl font-bold num bg-transparent outline-none pb-2 mt-2"
+            style={{ borderBottom: `1.5px solid ${C.border}`, color: C.ink }} />
+        </div>
+        <div>
+          <FieldLabel>密碼</FieldLabel>
+          <input type="text" inputMode="numeric" value={password}
+            onChange={e => { setPassword(e.target.value); setError(''); }}
+            placeholder="設定密碼"
+            className="w-full disp text-2xl font-bold num bg-transparent outline-none pb-2 mt-2"
+            style={{ borderBottom: `1.5px solid ${C.border}`, color: C.ink }} />
+        </div>
+        {error && (
+          <div className="text-sm font-bold pop flex items-center gap-1.5" style={{ color: C.ember }}>
+            <X size={14} strokeWidth={3} /> {error}
+          </div>
+        )}
+        <button onClick={handleCreate}
+          disabled={!account.trim() || !password || !name.trim() || loading}
+          className="w-full py-3 rounded-xl font-bold text-white upper disabled:opacity-30"
+          style={{ background: C.flame, boxShadow: '0 6px 20px rgba(255,107,31,.35)' }}>
+          {loading ? '建立中⋯' : '建立'}
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+function ChildDetailModal({ child, onClose, onDeleted }) {
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const stats = child.stats || {};
+  const lastUpdate = stats.lastUpdate
+    ? new Date(stats.lastUpdate).toLocaleString('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    : '從未';
+
+  const handleDelete = async () => {
+    setLoading(true);
+    try {
+      await fetch(cloudStorage.gasUrl, {
+        method: 'POST', mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          op: 'deleteChild',
+          master: VALID_ACCOUNT, masterPw: VALID_PASSWORD,
+          account: child.account,
+        }),
+      });
+      setTimeout(() => { if (onDeleted) onDeleted(); }, 1200);
+    } catch (e) {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <ModalShell title={stats.name || child.name || '子帳號'} subtitle={`帳號 ${child.account}`} onClose={onClose}>
+      <div className="rounded-xl p-5 space-y-2.5" style={{ background: C.cardSoft, border: `1px solid ${C.border}` }}>
+        <DataRow label="姓名" value={stats.name || child.name || '—'} />
+        <DataRow label="體重紀錄" value={`${stats.weightCount || 0} 筆`} />
+        <DataRow label="飲食紀錄" value={`${stats.diaryDays || 0} 天`} />
+        {stats.latestWeight !== null && stats.latestWeight !== undefined && (
+          <DataRow label="最新體重" value={`${stats.latestWeight.toFixed(1)} kg`} />
+        )}
+        {stats.targetWeight !== null && stats.targetWeight !== undefined && (
+          <DataRow label="目標體重" value={`${stats.targetWeight.toFixed(1)} kg`} />
+        )}
+        <DataRow label="最後同步" value={lastUpdate} />
+      </div>
+
+      <div className="mt-6">
+        {!confirmDel ? (
+          <button onClick={() => setConfirmDel(true)}
+            className="w-full py-3 text-sm rounded-xl font-bold upper"
+            style={{ color: C.ember, border: `1px solid ${C.border}`, background: C.card }}>
+            刪除此子帳號
+          </button>
+        ) : (
+          <div className="rounded-xl p-5" style={{ background: C.card, border: `1px solid ${C.ember}` }}>
+            <div className="text-sm font-bold mb-3" style={{ color: C.ember }}>
+              確定刪除？帳號和所有資料都會被永久刪除，無法復原。
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => setConfirmDel(false)}
+                className="flex-1 py-2.5 text-sm rounded-lg font-semibold"
+                style={{ background: C.cardSoft, color: C.ink }}>取消</button>
+              <button onClick={handleDelete} disabled={loading}
+                className="flex-1 py-2.5 text-sm rounded-lg font-bold text-white"
+                style={{ background: C.ember }}>{loading ? '刪除中⋯' : '確定刪除'}</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </ModalShell>
+  );
+}
+
 // ============================================================
 // Form helpers
 // ============================================================
@@ -1628,42 +2026,30 @@ function SettingsView({ goal, entries, diary, onBack, onSave, onReset }) {
 
       {/* CLOUD SYNC - top priority */}
       <SettingsGroup label="雲端同步">
-        <div>
-          <div className="flex items-center gap-3 mb-4">
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center"
-              style={{ background: 'rgba(6,214,160,0.15)', border: `1px solid rgba(6,214,160,0.3)` }}>
-              <Check size={16} strokeWidth={3} style={{ color: C.ok }} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-bold" style={{ color: C.ok }}>已連線</div>
-              <div className="text-[10px] mt-0.5" style={{ color: C.dim }}>資料自動同步到 Google 試算表</div>
-            </div>
-          </div>
-          <button onClick={async () => {
-              if (savedGas) return;
-              setSavedGas(true);
-              const url = cloudStorage.gasUrl;
-              const current = localStorage.getItem(STORAGE_KEY);
-              if (current && url) {
-                try {
-                  const payload = JSON.parse(current);
-                  await fetch(url, {
-                    method: 'POST',
-                    mode: 'no-cors',
-                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                    body: JSON.stringify({ op: 'set', user: getUserKey(), payload }),
-                  });
-                } catch (e) { console.warn('Sync failed', e); }
-              }
-              setTimeout(() => { setSavedGas(false); }, 1500);
-            }}
-            disabled={savedGas}
-            className="w-full py-3 rounded-xl font-bold text-white upper text-sm disabled:opacity-70 flex items-center justify-center gap-2"
-            style={{ background: C.flame, boxShadow: '0 6px 20px rgba(255,107,31,.35)' }}>
-            <Flame size={14} strokeWidth={2.5} />
-            {savedGas ? '同步中⋯' : '立即同步'}
-          </button>
-        </div>
+        <button onClick={async () => {
+            if (savedGas) return;
+            setSavedGas(true);
+            const url = cloudStorage.gasUrl;
+            const current = localStorage.getItem(STORAGE_KEY);
+            if (current && url) {
+              try {
+                const payload = JSON.parse(current);
+                await fetch(url, {
+                  method: 'POST',
+                  mode: 'no-cors',
+                  headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                  body: JSON.stringify({ op: 'set', user: getUserKey(), payload }),
+                });
+              } catch (e) { console.warn('Sync failed', e); }
+            }
+            setTimeout(() => { setSavedGas(false); }, 1500);
+          }}
+          disabled={savedGas}
+          className="w-full py-3 rounded-xl font-bold text-white upper text-sm disabled:opacity-70 flex items-center justify-center gap-2"
+          style={{ background: C.flame, boxShadow: '0 6px 20px rgba(255,107,31,.35)' }}>
+          <Flame size={14} strokeWidth={2.5} />
+          {savedGas ? '同步中⋯' : '立即同步'}
+        </button>
       </SettingsGroup>
 
       <SettingsGroup label="個人">
