@@ -72,7 +72,9 @@ import * as XLSX from 'xlsx';
 // =============================================================
 // Cloud Storage (Google Sheets via Apps Script)
 // =============================================================
-const LOCAL_GAS_KEY = 'wt-gas-url';
+// 🔒 GAS 網址寫死在這裡，要換的話編輯此行
+const HARDCODED_GAS_URL = 'https://script.google.com/macros/s/AKfycbxQ5nbY3Zcjgp0XXYo3FTW-Ep886vmmM4qGDofb6p5fmeBh8c5N8Zv5_rxZfq0bOyPfMg/exec';
+
 const LOCAL_USER_KEY = 'wt-user-key';
 
 function getUserKey() {
@@ -87,11 +89,8 @@ function getUserKey() {
 }
 
 const cloudStorage = {
-  get gasUrl() { return localStorage.getItem(LOCAL_GAS_KEY) || ''; },
-  setGasUrl(url) {
-    if (url && url.trim()) localStorage.setItem(LOCAL_GAS_KEY, url.trim());
-    else localStorage.removeItem(LOCAL_GAS_KEY);
-  },
+  get gasUrl() { return HARDCODED_GAS_URL; },
+  setGasUrl() { /* no-op, URL is hardcoded */ },
   async get(key) {
     const url = this.gasUrl;
     if (url) {
@@ -1595,7 +1594,6 @@ function SettingsView({ goal, entries, diary, onBack, onSave, onReset }) {
   const [waterGoal, setWaterGoal] = useState((goal?.waterGoal || DEFAULT_WATER_GOAL).toString());
   const [confirmReset, setConfirmReset] = useState(false);
   const diaryDays = Object.keys(diary || {}).length;
-  const [gasUrl, setGasUrl] = useState(cloudStorage.gasUrl);
   const [savedGas, setSavedGas] = useState(false);
   const tgtSugg = useMemo(() => suggestTarget(height), [height]);
   const calSugg = useMemo(() => {
@@ -1627,6 +1625,46 @@ function SettingsView({ goal, entries, diary, onBack, onSave, onReset }) {
           }}
           className="text-sm font-bold upper" style={{ color: C.flame }}>儲存</button>
       </div>
+
+      {/* CLOUD SYNC - top priority */}
+      <SettingsGroup label="雲端同步">
+        <div>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center"
+              style={{ background: 'rgba(6,214,160,0.15)', border: `1px solid rgba(6,214,160,0.3)` }}>
+              <Check size={16} strokeWidth={3} style={{ color: C.ok }} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-bold" style={{ color: C.ok }}>已連線</div>
+              <div className="text-[10px] mt-0.5" style={{ color: C.dim }}>資料自動同步到 Google 試算表</div>
+            </div>
+          </div>
+          <button onClick={async () => {
+              if (savedGas) return;
+              setSavedGas(true);
+              const url = cloudStorage.gasUrl;
+              const current = localStorage.getItem(STORAGE_KEY);
+              if (current && url) {
+                try {
+                  const payload = JSON.parse(current);
+                  await fetch(url, {
+                    method: 'POST',
+                    mode: 'no-cors',
+                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                    body: JSON.stringify({ op: 'set', user: getUserKey(), payload }),
+                  });
+                } catch (e) { console.warn('Sync failed', e); }
+              }
+              setTimeout(() => { setSavedGas(false); }, 1500);
+            }}
+            disabled={savedGas}
+            className="w-full py-3 rounded-xl font-bold text-white upper text-sm disabled:opacity-70 flex items-center justify-center gap-2"
+            style={{ background: C.flame, boxShadow: '0 6px 20px rgba(255,107,31,.35)' }}>
+            <Flame size={14} strokeWidth={2.5} />
+            {savedGas ? '同步中⋯' : '立即同步'}
+          </button>
+        </div>
+      </SettingsGroup>
 
       <SettingsGroup label="個人">
         <SettingField label="姓名">
@@ -1677,67 +1715,6 @@ function SettingsView({ goal, entries, diary, onBack, onSave, onReset }) {
           <input type="number" inputMode="numeric" value={waterGoal} onChange={e => setWaterGoal(e.target.value)}
             className="flex-1 disp text-xl font-bold num bg-transparent outline-none" style={{ color: C.ink }} />
         </SettingField>
-      </SettingsGroup>
-
-      <SettingsGroup label="雲端同步">
-        <div>
-          <div className="flex items-baseline justify-between">
-            <label className="text-[10px] upper font-semibold" style={{ color: C.mute }}>Apps Script 網址</label>
-            {cloudStorage.gasUrl && (
-              <span className="text-[10px] upper font-bold flex items-center gap-1" style={{ color: C.ok }}>
-                <Check size={9} strokeWidth={3} /> 已連線
-              </span>
-            )}
-          </div>
-          <textarea value={gasUrl} onChange={e => { setGasUrl(e.target.value); setSavedGas(false); }}
-            placeholder="https://script.google.com/macros/s/.../exec"
-            rows={2} spellCheck={false}
-            className="w-full text-[11px] p-2.5 mt-2 rounded-lg outline-none resize-none"
-            style={{ background: C.cardSoft, border: `1px solid ${C.borderSoft}`, color: C.ink, fontFamily: 'ui-monospace, monospace', wordBreak: 'break-all' }} />
-          <div className="flex gap-2 mt-2">
-            <button onClick={async () => {
-                if (savedGas) return;
-                setSavedGas(true);
-                const url = gasUrl.trim();
-                cloudStorage.setGasUrl(url);
-                // Explicitly push current local data to cloud
-                const current = localStorage.getItem(STORAGE_KEY);
-                if (current && url) {
-                  try {
-                    const payload = JSON.parse(current);
-                    await fetch(url, {
-                      method: 'POST',
-                      mode: 'no-cors',
-                      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                      body: JSON.stringify({ op: 'set', user: getUserKey(), payload }),
-                    });
-                  } catch (e) { console.warn('Initial sync failed', e); }
-                }
-                setTimeout(() => window.location.reload(), 1200);
-              }}
-              disabled={savedGas}
-              className="flex-1 py-2 text-xs rounded-lg font-bold text-white upper disabled:opacity-70"
-              style={{ background: C.flame }}>
-              {savedGas ? '同步中⋯' : '同步'}
-            </button>
-            {cloudStorage.gasUrl && (
-              <button onClick={() => {
-                if (confirm('確定要中斷雲端同步？資料會保留在這台裝置。')) {
-                  cloudStorage.setGasUrl('');
-                  setGasUrl('');
-                  setSavedGas(false);
-                }
-              }}
-                className="px-3 py-2 text-xs rounded-lg font-bold upper"
-                style={{ background: C.cardSoft, color: C.ember, border: `1px solid ${C.border}` }}>
-                中斷
-              </button>
-            )}
-          </div>
-          <div className="text-[10px] mt-2 leading-relaxed" style={{ color: C.dim }}>
-            部署 Google Apps Script 後，把網址貼到這裡。資料會自動同步到你的 Google 試算表，所有裝置可同步。
-          </div>
-        </div>
       </SettingsGroup>
 
       <div className="mt-6">
