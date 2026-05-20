@@ -1695,14 +1695,30 @@ function SettingsView({ goal, entries, diary, onBack, onSave, onReset }) {
             className="w-full text-[11px] p-2.5 mt-2 rounded-lg outline-none resize-none"
             style={{ background: C.cardSoft, border: `1px solid ${C.borderSoft}`, color: C.ink, fontFamily: 'ui-monospace, monospace', wordBreak: 'break-all' }} />
           <div className="flex gap-2 mt-2">
-            <button onClick={() => {
-                cloudStorage.setGasUrl(gasUrl);
+            <button onClick={async () => {
+                if (savedGas) return;
                 setSavedGas(true);
-                setTimeout(() => window.location.reload(), 600);
+                const url = gasUrl.trim();
+                cloudStorage.setGasUrl(url);
+                // Explicitly push current local data to cloud
+                const current = localStorage.getItem(STORAGE_KEY);
+                if (current && url) {
+                  try {
+                    const payload = JSON.parse(current);
+                    await fetch(url, {
+                      method: 'POST',
+                      mode: 'no-cors',
+                      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                      body: JSON.stringify({ op: 'set', user: getUserKey(), payload }),
+                    });
+                  } catch (e) { console.warn('Initial sync failed', e); }
+                }
+                setTimeout(() => window.location.reload(), 1200);
               }}
-              className="flex-1 py-2 text-xs rounded-lg font-bold text-white upper"
+              disabled={savedGas}
+              className="flex-1 py-2 text-xs rounded-lg font-bold text-white upper disabled:opacity-70"
               style={{ background: C.flame }}>
-              {savedGas ? '已儲存 · 重新載入中' : '儲存並同步'}
+              {savedGas ? '同步中⋯' : '同步'}
             </button>
             {cloudStorage.gasUrl && (
               <button onClick={() => {
@@ -1945,12 +1961,6 @@ function ExportView({ goal, entries, diary, from, setFrom, to, setTo, onBack, sh
             style={{ background: C.flame, boxShadow: '0 6px 20px rgba(255,107,31,.35)' }}>
             <Printer size={16} strokeWidth={2.5} />
             列印 / 儲存 PDF
-          </button>
-          <button onClick={exportExcel}
-            className="w-full py-4 rounded-xl font-bold upper flex items-center justify-center gap-2"
-            style={{ background: C.cardSoft, color: C.ink, border: `1px solid ${C.border}` }}>
-            <FileSpreadsheet size={16} strokeWidth={2.5} />
-            匯出 Excel (.xlsx)
           </button>
           <div className="text-[10px] text-center mt-2" style={{ color: C.dim }}>
             列印對話框中可選「儲存為 PDF」
