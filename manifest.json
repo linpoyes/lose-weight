@@ -1,6 +1,6 @@
 {
-  "name": "減重日誌 · BURN",
-  "short_name": "減重日誌",
+  "name": "健康日誌",
+  "short_name": "健康日誌",
   "description": "運動燃燒風格的減重與飲食追蹤工具",
   "start_url": "./index.html",
   "scope": "./",
